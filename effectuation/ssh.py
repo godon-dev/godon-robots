@@ -26,7 +26,7 @@ import time
 from typing import Dict, Any, List
 import wmill
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
     effectuation_config = context.get('effectuation', {})
     playbook_path = effectuation_config.get('playbook_path',
-        "f/breeder/strains/linux_performance/effectuate_settings")
+        "f/systemtender/strains/linux_performance/effectuate_settings")
     stabilization_seconds = effectuation_config.get('stabilization_seconds', 0)
 
     logger.info(f"SSH effectuation for {len(targets)} targets via playbook {playbook_path}")

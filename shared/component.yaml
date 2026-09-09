@@ -1,10 +1,10 @@
 name: shared
-target: breeder/shared
+target: systemtender/shared
 workspace: godon
 
 scripts:
   - pattern: "*.py"
     settings:
-      summary: "Shared utilities for godon-breeders"
+      summary: "Shared utilities for godon-systemtenders"
       description: "Common modules including OTel logging, helpers"
       tag: "default"

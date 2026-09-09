@@ -1,18 +1,18 @@
-# godon-breeders
+# godon-systemtenders
 
-Autonomous breeder agents for optimization using metaheuristic search.
+Autonomous systemtender agents for optimization using metaheuristic search.
 
 ## Architecture
 
-Breeders are self-driving optimization agents that use **Optuna ask/tell pattern** for parameter search - further metaheuristics frameworks may follow. Effectuation and reconnaissance are executed as Windmill scripts on target systems.
+Systemtenders are self-driving optimization agents that use **Optuna ask/tell pattern** for parameter search - further metaheuristics frameworks may follow. Effectuation and reconnaissance are executed as Windmill scripts on target systems.
 
 The system follows an **engine + strains** architecture: the engine provides the generic optimization loop (algorithm diversity, guardrails, rollback, cooperation, metrics), while strains encapsulate domain-specific knowledge (parameter suggestion, validation).
 
 ### Engine (`engine/`)
 
-- **BreederWorker**: Generic optimization agent with lifecycle management, algorithm diversity across parallel workers, guardrail checking, and rollback support
-- **Communication**: Cooperative trial sharing between breeders via Optuna database (probabilistic, best, worst, extremes strategies)
-- **BreederMetricsClient**: Prometheus metrics pushing via Push Gateway
+- **SystemtenderWorker**: Generic optimization agent with lifecycle management, algorithm diversity across parallel workers, guardrail checking, and rollback support
+- **Communication**: Cooperative trial sharing between systemtenders via Optuna database (probabilistic, best, worst, extremes strategies)
+- **SystemtenderMetricsClient**: Prometheus metrics pushing via Push Gateway
 - **Strain Loader**: Dynamic loading and contract validation of strain modules
 
 ### Strains (`strains/`)
@@ -24,7 +24,7 @@ Each strain provides domain-specific logic as a pluggable module:
 ### Effectuation (`effectuation/`)
 
 Scripts that apply parameter changes to target systems. Each script follows the `(context, targets, settings)` interface contract:
-- `context` — static breeder run configuration (credentials, URLs, playbook paths)
+- `context` — static systemtender run configuration (credentials, URLs, playbook paths)
 - `targets` — list of target systems to apply changes to
 - `settings` — the optimizer's parameter suggestions for this trial
 

@@ -20,8 +20,8 @@
 from typing import Dict, Any, List, Optional
 
 import optuna
-from f.breeder.strains.linux_performance.parameter_registry import PARAMETER_REGISTRY
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.strains.linux_performance.parameter_registry import PARAMETER_REGISTRY
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -96,5 +96,5 @@ def _suggest_single_param(trial: optuna.Trial, param_name: str,
 
 
 def validate_config(config):
-    from f.breeder.strains.linux_performance import preflight
+    from f.systemtender.strains.linux_performance import preflight
     return preflight.main(config)

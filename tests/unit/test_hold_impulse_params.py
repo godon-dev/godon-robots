@@ -24,19 +24,19 @@ import types
 from unittest.mock import MagicMock, patch
 from optuna.trial import TrialState
 
-otel_mock = types.ModuleType('f.breeder.shared.otel_logging')
+otel_mock = types.ModuleType('f.systemtender.shared.otel_logging')
 otel_mock.get_logger = lambda name: type('Logger', (), {
     'info': lambda *a, **kw: None, 'warning': lambda *a, **kw: None, 'error': lambda *a, **kw: None,
 })()
-sys.modules['f.breeder.shared.otel_logging'] = otel_mock
+sys.modules['f.systemtender.shared.otel_logging'] = otel_mock
 
-# Mock Windmill package namespace for breeder_worker internal imports
-for mod_path in ['f', 'f.breeder', 'f.breeder.engine',
-                 'f.breeder.engine.probe_coordinator',
-                 'f.breeder.engine.breeder_metrics_client',
-                 'f.breeder.engine.communication',
-                 'f.breeder.engine.strain_loader',
-                 'f.breeder.engine.watermark']:
+# Mock Windmill package namespace for systemtender_worker internal imports
+for mod_path in ['f', 'f.systemtender', 'f.systemtender.engine',
+                 'f.systemtender.engine.probe_coordinator',
+                 'f.systemtender.engine.systemtender_metrics_client',
+                 'f.systemtender.engine.communication',
+                 'f.systemtender.engine.strain_loader',
+                 'f.systemtender.engine.watermark']:
     parts = mod_path.split('.')
     parent = '.'.join(parts[:-1]) if len(parts) > 1 else None
     mock_mod = types.ModuleType(mod_path)
@@ -44,19 +44,19 @@ for mod_path in ['f', 'f.breeder', 'f.breeder.engine',
         setattr(sys.modules[parent], parts[-1], mock_mod)
     sys.modules[mod_path] = mock_mod
 
-sys.modules['f.breeder.engine.probe_coordinator'].ProbeCoordinator = MagicMock
-sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
-sys.modules['f.breeder.engine.communication'].CommunicationCallback = MagicMock
-sys.modules['f.breeder.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
-sys.modules['f.breeder.engine.watermark'].create_watermark = MagicMock(return_value=None)
-sys.modules['f.breeder.engine.watermark'].Watermark = MagicMock
+sys.modules['f.systemtender.engine.probe_coordinator'].ProbeCoordinator = MagicMock
+sys.modules['f.systemtender.engine.systemtender_metrics_client'].SystemtenderMetricsClient = MagicMock
+sys.modules['f.systemtender.engine.communication'].CommunicationCallback = MagicMock
+sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
+sys.modules['f.systemtender.engine.watermark'].create_watermark = MagicMock(return_value=None)
+sys.modules['f.systemtender.engine.watermark'].Watermark = MagicMock
 wmill_mock = types.ModuleType('wmill')
 wmill_mock.run_script_by_path = MagicMock()
 sys.modules['wmill'] = wmill_mock
 psycopg2_mock = types.ModuleType('psycopg2')
 sys.modules['psycopg2'] = psycopg2_mock
 
-from engine.breeder_worker import BreederWorker
+from engine.systemtender_worker import SystemtenderWorker
 
 
 def _greenhouse_settings():
@@ -82,7 +82,7 @@ def _make_trial(state=1, user_attrs=None, flat_params=None):
 def _make_worker_with_trials(trials):
     """Create a worker with a real list for study.trials."""
     config = {
-        'breeder': {'type': 'bench_greenhouse', 'uuid': 'test-uuid', 'name': 'test'},
+        'systemtender': {'type': 'bench_greenhouse', 'uuid': 'test-uuid', 'name': 'test'},
         'creation_ts': '2025-01-15T10:30:00Z',
         'settings': _greenhouse_settings(),
         'effectuation': {'type': 'http', 'targets': []},
@@ -93,12 +93,12 @@ def _make_worker_with_trials(trials):
     }
     study = MagicMock()
     study.trials = list(trials)
-    with patch.object(BreederWorker, '_load_or_create_study', return_value=study), \
-         patch.object(BreederWorker, '_setup_communication', return_value=None), \
-         patch.object(BreederWorker, '_update_state'), \
-         patch.object(BreederWorker, '_register_interference_breeder'), \
-         patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
-        worker = BreederWorker(config)
+    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
+         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
+         patch.object(SystemtenderWorker, '_update_state'), \
+         patch.object(SystemtenderWorker, '_register_interference_systemtender'), \
+         patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
+        worker = SystemtenderWorker(config)
     worker.study = study
     return worker
 

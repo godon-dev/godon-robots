@@ -24,15 +24,15 @@
 
 import importlib
 from typing import Any
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
 STRAIN_MODULES = {
-    "linux_performance": "f.breeder.strains.linux_performance.strain",
-    "bench_greenhouse": "f.breeder.strains.bench_greenhouse.strain",
-    "bench_microgrid": "f.breeder.strains.bench_microgrid.strain",
-    "bench_generic": "f.breeder.strains.bench_generic.strain",
+    "linux_performance": "f.systemtender.strains.linux_performance.strain",
+    "bench_greenhouse": "f.systemtender.strains.bench_greenhouse.strain",
+    "bench_microgrid": "f.systemtender.strains.bench_microgrid.strain",
+    "bench_generic": "f.systemtender.strains.bench_generic.strain",
 }
 
 REQUIRED_ATTRS = ("suggest_params", "validate_config")

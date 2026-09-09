@@ -32,17 +32,17 @@ sys.modules['prometheus_api_client.exceptions'] = MagicMock()
 sys.modules['psycopg2'] = MagicMock()
 
 fake_f = MagicMock()
-fake_breeder = MagicMock()
-fake_breeder_shared = MagicMock()
-fake_f.breeder = fake_breeder
-fake_breeder.shared = fake_breeder_shared
+fake_systemtender = MagicMock()
+fake_systemtender_shared = MagicMock()
+fake_f.systemtender = fake_systemtender
+fake_systemtender.shared = fake_systemtender_shared
 sys.modules['f'] = fake_f
-sys.modules['f.breeder'] = fake_breeder
-sys.modules['f.breeder.shared'] = fake_breeder_shared
+sys.modules['f.systemtender'] = fake_systemtender
+sys.modules['f.systemtender.shared'] = fake_systemtender_shared
 
 fake_otel = MagicMock()
 fake_otel.get_logger = lambda name: MagicMock()
-sys.modules['f.breeder.shared.otel_logging'] = fake_otel
+sys.modules['f.systemtender.shared.otel_logging'] = fake_otel
 
 import reconnaissance.prometheus as prom_mod
 from reconnaissance.prometheus import extract_scalar_value, aggregate_samples, _gather_single_metric

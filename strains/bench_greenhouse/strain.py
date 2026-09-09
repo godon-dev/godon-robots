@@ -20,8 +20,8 @@
 from typing import Dict, Any, List
 
 import optuna
-from f.breeder.strains.bench_greenhouse.parameter_registry import PARAMETER_REGISTRY
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.strains.bench_greenhouse.parameter_registry import PARAMETER_REGISTRY
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -82,5 +82,5 @@ def _suggest_single(trial, param_name: str, constraints_list: List[Dict[str, Any
 
 
 def validate_config(config):
-    from f.breeder.strains.bench_greenhouse import preflight
+    from f.systemtender.strains.bench_greenhouse import preflight
     return preflight.main(config)

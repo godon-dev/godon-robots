@@ -31,32 +31,32 @@ sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
 sys.modules['optuna.samplers'] = MagicMock()
 
-# Mock Windmill package namespace so breeder_worker's internal imports resolve
+# Mock Windmill package namespace so systemtender_worker's internal imports resolve
 sys.modules['f'] = MagicMock()
-sys.modules['f.breeder'] = MagicMock()
-sys.modules['f.breeder.engine'] = MagicMock()
-sys.modules['f.breeder.engine.probe_coordinator'] = MagicMock()
-sys.modules['f.breeder.engine.probe_coordinator'].ProbeCoordinator = MagicMock
-sys.modules['f.breeder.engine.breeder_metrics_client'] = MagicMock()
-sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
-sys.modules['f.breeder.engine.communication'] = MagicMock()
-sys.modules['f.breeder.engine.communication'].CommunicationCallback = MagicMock
-sys.modules['f.breeder.engine.strain_loader'] = MagicMock()
-sys.modules['f.breeder.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
-sys.modules['f.breeder.engine.watermark'] = MagicMock()
-sys.modules['f.breeder.engine.watermark'].create_watermark = MagicMock(return_value=None)
-sys.modules['f.breeder.engine.watermark'].Watermark = MagicMock
-sys.modules['f.breeder.shared'] = MagicMock()
-sys.modules['f.breeder.shared.otel_logging'] = MagicMock()
-sys.modules['f.breeder.shared.otel_logging'].get_logger = MagicMock(return_value=MagicMock())
+sys.modules['f.systemtender'] = MagicMock()
+sys.modules['f.systemtender.engine'] = MagicMock()
+sys.modules['f.systemtender.engine.probe_coordinator'] = MagicMock()
+sys.modules['f.systemtender.engine.probe_coordinator'].ProbeCoordinator = MagicMock
+sys.modules['f.systemtender.engine.systemtender_metrics_client'] = MagicMock()
+sys.modules['f.systemtender.engine.systemtender_metrics_client'].SystemtenderMetricsClient = MagicMock
+sys.modules['f.systemtender.engine.communication'] = MagicMock()
+sys.modules['f.systemtender.engine.communication'].CommunicationCallback = MagicMock
+sys.modules['f.systemtender.engine.strain_loader'] = MagicMock()
+sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
+sys.modules['f.systemtender.engine.watermark'] = MagicMock()
+sys.modules['f.systemtender.engine.watermark'].create_watermark = MagicMock(return_value=None)
+sys.modules['f.systemtender.engine.watermark'].Watermark = MagicMock
+sys.modules['f.systemtender.shared'] = MagicMock()
+sys.modules['f.systemtender.shared.otel_logging'] = MagicMock()
+sys.modules['f.systemtender.shared.otel_logging'].get_logger = MagicMock(return_value=MagicMock())
 
-from engine.breeder_worker import BreederWorker
+from engine.systemtender_worker import SystemtenderWorker
 
 
 def _base_config(**overrides):
     config = {
-        'breeder': {
-            'name': 'test_breeder',
+        'systemtender': {
+            'name': 'test_systemtender',
             'uuid': 'test-uuid-123',
             'type': 'linux_performance',
         },
@@ -88,11 +88,11 @@ def _create_worker(**config_overrides):
     config = _base_config(**config_overrides)
     study = _mock_study()
 
-    with patch.object(BreederWorker, '_load_or_create_study', return_value=study), \
-         patch.object(BreederWorker, '_setup_communication', return_value=None), \
-         patch.object(BreederWorker, '_update_state'), \
-         patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
-        worker = BreederWorker(config)
+    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
+         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
+         patch.object(SystemtenderWorker, '_update_state'), \
+         patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
+        worker = SystemtenderWorker(config)
     worker._check_shutdown_requested = lambda: False
     return worker
 
@@ -335,11 +335,11 @@ class TestWorkerInit:
         del config['creation_ts']
 
         with pytest.raises(ValueError, match="creation_ts"):
-            with patch.object(BreederWorker, '_load_or_create_study'), \
-                 patch.object(BreederWorker, '_setup_communication', return_value=None), \
-                 patch.object(BreederWorker, '_update_state'), \
-                 patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
-                BreederWorker(config)
+            with patch.object(SystemtenderWorker, '_load_or_create_study'), \
+                 patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
+                 patch.object(SystemtenderWorker, '_update_state'), \
+                 patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
+                SystemtenderWorker(config)
 
     def test_target_resolution_valid(self):
         worker = _create_worker(effectuation={
@@ -537,7 +537,7 @@ class TestExecuteTrialUsesRunRecon:
 
 
 class TestPublishStandingParams:
-    """Per-trial upsert of the breeder's applied params — the standing
+    """Per-trial upsert of the systemtender's applied params — the standing
     dials causal stamps curve points with (the ambient of measurement)."""
 
     def setup_method(self):
@@ -554,11 +554,11 @@ class TestPublishStandingParams:
         worker._publish_standing_params({'param_0': 50.0})
 
         sql, args = cursor.execute.call_args[0]
-        assert 'UPDATE interference_active_breeders' in sql
+        assert 'UPDATE interference_active_systemtenders' in sql
         assert 'params = %s' in sql
         assert 'last_seen = NOW()' in sql
         assert _json.loads(args[0]) == {'param_0': 50.0}
-        assert args[1] == worker.breeder_id
+        assert args[1] == worker.systemtender_id
 
     def test_skips_without_detection_section(self):
         worker = _create_worker()  # base config: pure optimizer

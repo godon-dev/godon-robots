@@ -30,16 +30,16 @@ import pytest
 import sys
 import types
 
-# Mock the f.breeder.shared.otel_logging module
-otel_mock = types.ModuleType('f.breeder.shared.otel_logging')
+# Mock the f.systemtender.shared.otel_logging module
+otel_mock = types.ModuleType('f.systemtender.shared.otel_logging')
 otel_mock.get_logger = lambda name: type('Logger', (), {'info': lambda *a, **kw: None, 'warning': lambda *a, **kw: None, 'error': lambda *a, **kw: None})()
-sys.modules['f.breeder.shared.otel_logging'] = otel_mock
+sys.modules['f.systemtender.shared.otel_logging'] = otel_mock
 
 from engine.watermark import create_watermark, Impulse
 
 
 def _base_config(slot=None):
-    """Create a minimal breeder config with optional watermark_slot."""
+    """Create a minimal systemtender config with optional watermark_slot."""
     config = {
         'interference_detection': {'mode': 'active'},
         'settings': {
@@ -52,10 +52,10 @@ def _base_config(slot=None):
                 },
             }
         },
-        'breeder': {'type': 'bench_microgrid'},
+        'systemtender': {'type': 'bench_microgrid'},
     }
     if slot is not None:
-        config['breeder']['watermark_slot'] = slot
+        config['systemtender']['watermark_slot'] = slot
     return config
 
 
@@ -132,7 +132,7 @@ class TestNoParamsWithRanges:
                     'fixed_param': {'value': 42},
                 }
             },
-            'breeder': {'type': 'bench_microgrid'},
+            'systemtender': {'type': 'bench_microgrid'},
         }
         wm = create_watermark(config, config['settings'])
         assert wm is None

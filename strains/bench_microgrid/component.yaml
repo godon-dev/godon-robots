@@ -1,5 +1,5 @@
 name: bench_microgrid_strain
-target: breeder/strains/bench_microgrid
+target: systemtender/strains/bench_microgrid
 workspace: godon
 
 scripts:
@@ -7,6 +7,6 @@ scripts:
     settings:
       summary: "Microgrid Bench Strain"
       description: "Domain knowledge for microgrid simulation optimization - parameter registry, preflight validation, and suggestion logic for power grid management"
-      tag: "breeder"
+      tag: "systemtender"
 
 flows: []

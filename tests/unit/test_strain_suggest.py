@@ -202,7 +202,7 @@ class TestValidateConfig:
         config = {'settings': {'sysctl': {}}}
         mock_preflight = MagicMock()
         mock_preflight.main.return_value = {'result': 'SUCCESS'}
-        parent_mod = sys.modules['f.breeder.strains.linux_performance']
+        parent_mod = sys.modules['f.systemtender.strains.linux_performance']
         with patch.object(parent_mod, 'preflight', mock_preflight, create=True):
             result = validate_config(config)
             mock_preflight.main.assert_called_once_with(config)

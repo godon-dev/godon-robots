@@ -31,13 +31,13 @@ sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
 sys.modules['optuna.samplers'] = MagicMock()
 
-from engine.breeder_worker import BreederWorker
+from engine.systemtender_worker import SystemtenderWorker
 
 
 def _base_config(**overrides):
     config = {
-        'breeder': {
-            'name': 'test_breeder',
+        'systemtender': {
+            'name': 'test_systemtender',
             'uuid': 'test-uuid-123',
             'type': 'linux_performance',
         },
@@ -52,12 +52,12 @@ def _base_config(**overrides):
 
 def _create_worker(**config_overrides):
     config = _base_config(**config_overrides)
-    with patch.object(BreederWorker, '_load_or_create_study') as mock_study, \
-         patch.object(BreederWorker, '_setup_communication', return_value=None), \
-         patch.object(BreederWorker, '_update_state'), \
-         patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
+    with patch.object(SystemtenderWorker, '_load_or_create_study') as mock_study, \
+         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
+         patch.object(SystemtenderWorker, '_update_state'), \
+         patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
         mock_study.return_value = MagicMock()
-        return BreederWorker(config)
+        return SystemtenderWorker(config)
 
 
 def _mock_study_with_attrs():
@@ -167,18 +167,18 @@ class TestRollbackStateManagement:
         )
         study = _mock_study_with_attrs()
 
-        with patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
-            worker = BreederWorker.__new__(BreederWorker)
+        with patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
+            worker = SystemtenderWorker.__new__(SystemtenderWorker)
             worker.config = config
             worker.study = study
-            worker.breeder_id = 'test-breeder-id'
-            worker.breeder_uuid = 'test-uuid'
+            worker.systemtender_id = 'test-systemtender-id'
+            worker.systemtender_uuid = 'test-uuid'
             worker.worker_id = 'test_worker_test-uuid'
             worker.target_id = 0
             worker.target = config['effectuation']['targets'][0]
             worker.rollback_config = config['effectuation']['targets'][0]['rollback']
             worker.rollback_enabled = True
-            worker.breeder_type = 'linux_performance'
+            worker.systemtender_type = 'linux_performance'
             worker.metrics = MagicMock()
 
         return worker
@@ -333,18 +333,18 @@ class TestExecuteRollback:
         study = _mock_study_with_attrs()
         study.best_trials = best_trials or []
 
-        with patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
-            worker = BreederWorker.__new__(BreederWorker)
+        with patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
+            worker = SystemtenderWorker.__new__(SystemtenderWorker)
             worker.config = config
             worker.study = study
-            worker.breeder_id = 'test-breeder-id'
-            worker.breeder_uuid = 'test-uuid'
+            worker.systemtender_id = 'test-systemtender-id'
+            worker.systemtender_uuid = 'test-uuid'
             worker.worker_id = 'test_worker_test-uuid'
             worker.target_id = 0
             worker.target = config['effectuation']['targets'][0]
             worker.rollback_config = config['effectuation']['targets'][0]['rollback']
             worker.rollback_enabled = True
-            worker.breeder_type = 'linux_performance'
+            worker.systemtender_type = 'linux_performance'
             worker.metrics = MagicMock()
 
         worker._init_rollback_state()

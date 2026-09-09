@@ -1,5 +1,5 @@
 name: linux_performance_strain
-target: breeder/strains/linux_performance
+target: systemtender/strains/linux_performance
 workspace: godon
 
 scripts:
@@ -7,13 +7,13 @@ scripts:
     settings:
       summary: "Linux Performance Strain"
       description: "Domain knowledge for Linux system parameter optimization - parameter registry, preflight validation, and suggestion logic"
-      tag: "breeder"
+      tag: "systemtender"
 
   - pattern: "effectuate_settings.yml"
     settings:
       summary: "Linux Performance Parameters Effectuation Playbook"
       description: "Ansible playbook for applying sysctl, sysfs, cpufreq, and ethtool parameters via SSH"
-      tag: "breeder"
+      tag: "systemtender"
 
 flows:
   - pattern: "effectuation_flow.yaml"

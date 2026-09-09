@@ -25,27 +25,27 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-# Mock external dependencies before importing breeder worker
+# Mock external dependencies before importing systemtender worker
 sys.modules['wmill'] = MagicMock()
 sys.modules['optuna'] = MagicMock()
 sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
 sys.modules['optuna.samplers'] = MagicMock()
 
-from engine.breeder_worker import BreederWorker
+from engine.systemtender_worker import SystemtenderWorker
 
 
 class TestSamplerAssignment:
     """Test sampler assignment logic for algorithm diversity"""
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
     def test_single_worker_gets_tpe_sampler(self, mock_update, mock_comm, mock_study):
         """Test that single worker configuration defaults to TPE sampler"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid_123'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -57,18 +57,18 @@ class TestSamplerAssignment:
         
         mock_study.return_value = MagicMock()
         
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
         assert worker.sampler_type == 'tpe', "Single worker should use TPE sampler"
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
     def test_multiple_workers_get_different_samplers(self, mock_update, mock_comm, mock_study):
         """Test that multiple workers get assigned different samplers"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid_123'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -84,8 +84,8 @@ class TestSamplerAssignment:
         workers = []
         for i in range(3):
             worker_config = config.copy()
-            worker_config['breeder']['uuid'] = f'test_uuid_{i}'
-            worker = BreederWorker(worker_config)
+            worker_config['systemtender']['uuid'] = f'test_uuid_{i}'
+            worker = SystemtenderWorker(worker_config)
             workers.append(worker)
         
         # Check that workers have sampler types assigned
@@ -95,14 +95,14 @@ class TestSamplerAssignment:
         for sampler_type in sampler_types:
             assert sampler_type in valid_samplers, f"Invalid sampler type: {sampler_type}"
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
     def test_sampler_assignment_is_deterministic(self, mock_update, mock_comm, mock_study):
         """Test that same worker_id always gets same sampler"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'deterministic_test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -115,8 +115,8 @@ class TestSamplerAssignment:
         mock_study.return_value = MagicMock()
         
         # Create two workers with same config
-        worker1 = BreederWorker(config)
-        worker2 = BreederWorker(config)
+        worker1 = SystemtenderWorker(config)
+        worker2 = SystemtenderWorker(config)
         
         assert worker1.sampler_type == worker2.sampler_type, \
             "Same worker_id should produce same sampler assignment"
@@ -125,14 +125,14 @@ class TestSamplerAssignment:
 class TestSamplerCreation:
     """Test sampler parameter randomization"""
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
     def test_tpe_sampler_gets_randomized_config(self, mock_update, mock_comm, mock_study):
         """Test that TPE sampler gets randomized parameters"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -141,28 +141,28 @@ class TestSamplerCreation:
         }
         
         mock_study.return_value = MagicMock()
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
         # Force TPE sampler for this test
         worker.sampler_type = 'tpe'
         
-        with patch('engine.breeder_worker.random.choice') as mock_random:
+        with patch('engine.systemtender_worker.random.choice') as mock_random:
             mock_random.side_effect = [(True, False), True, 10]  # (multivariate, group), constant_liar, n_startup
             
-            with patch('engine.breeder_worker.TPESampler') as mock_tpe:
+            with patch('engine.systemtender_worker.TPESampler') as mock_tpe:
                 worker._create_sampler('tpe')
                 
                 # Check that TPESampler was called with randomized config
                 assert mock_tpe.called, "TPESampler should be instantiated"
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
     def test_nsga2_sampler_gets_randomized_config(self, mock_update, mock_comm, mock_study):
         """Test that NSGA2 sampler gets randomized parameters"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -171,16 +171,16 @@ class TestSamplerCreation:
         }
         
         mock_study.return_value = MagicMock()
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
         # Force NSGA2 sampler for this test
         worker.sampler_type = 'nsga2'
         
-        with patch('engine.breeder_worker.random.choice') as mock_random:
+        with patch('engine.systemtender_worker.random.choice') as mock_random:
             # population_size, mutation_prob, crossover_prob, crossover
             mock_random.side_effect = [50, 0.1, 0.9, 'uniform']
             
-            with patch('engine.breeder_worker.NSGAIISampler') as mock_nsga2:
+            with patch('engine.systemtender_worker.NSGAIISampler') as mock_nsga2:
                 worker._create_sampler('nsga2')
                 
                 assert mock_nsga2.called, "NSGAIISampler should be instantiated"
@@ -189,14 +189,14 @@ class TestSamplerCreation:
 class TestStudyNaming:
     """Test study naming for multi-study architecture"""
     
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
-    @patch('engine.breeder_worker.optuna')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
+    @patch('engine.systemtender_worker.optuna')
     def test_single_worker_creates_single_study(self, mock_optuna, mock_update, mock_comm):
         """Test that single worker creates standard study name"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -211,19 +211,19 @@ class TestStudyNaming:
         mock_optuna.load_study.side_effect = KeyError("Study not found")
         mock_optuna.create_study.return_value = MagicMock()
         
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
         # Check study name doesn't include sampler type
         assert '_study' in str(mock_optuna.create_study.call_args)
     
-    @patch('engine.breeder_worker.BreederWorker._setup_communication')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
-    @patch('engine.breeder_worker.optuna')
+    @patch('engine.systemtender_worker.SystemtenderWorker._setup_communication')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
+    @patch('engine.systemtender_worker.optuna')
     def test_multiple_workers_create_sampler_specific_studies(self, mock_optuna, mock_update, mock_comm):
         """Test that multiple workers create sampler-specific study names"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -238,7 +238,7 @@ class TestStudyNaming:
         mock_optuna.load_study.side_effect = KeyError("Study not found")
         mock_optuna.create_study.return_value = MagicMock()
         
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
         # Check that study name includes sampler type
         call_args = str(mock_optuna.create_study.call_args)
@@ -248,25 +248,25 @@ class TestStudyNaming:
 class TestCommunicationCallback:
     """Test communication callback for multi-study coordination"""
     
-    def test_share_within_breeder_flag_for_parallel_workers(self):
-        """Test that parallel workers enable share_within_breeder"""
-        from engine.breeder_worker import CommunicationCallback
+    def test_share_within_systemtender_flag_for_parallel_workers(self):
+        """Test that parallel workers enable share_within_systemtender"""
+        from engine.systemtender_worker import CommunicationCallback
         
         callback = CommunicationCallback(
             storage="test_storage",
             probability=0.8,
-            share_within_breeder=True
+            share_within_systemtender=True
         )
         
-        assert callback.share_within_breeder == True
+        assert callback.share_within_systemtender == True
     
-    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('engine.breeder_worker.BreederWorker._update_state')
-    def test_parallel_workers_enables_intra_breeder_sharing(self, mock_update, mock_study):
-        """Test that parallel worker configuration enables share_within_breeder"""
+    @patch('engine.systemtender_worker.SystemtenderWorker._load_or_create_study')
+    @patch('engine.systemtender_worker.SystemtenderWorker._update_state')
+    def test_parallel_workers_enables_intra_systemtender_sharing(self, mock_update, mock_study):
+        """Test that parallel worker configuration enables share_within_systemtender"""
         config = {
-            'breeder': {
-                'name': 'test_breeder',
+            'systemtender': {
+                'name': 'test_systemtender',
                 'uuid': 'test_uuid'
             },
             'creation_ts': '2025-01-15T10:30:00Z',
@@ -277,8 +277,8 @@ class TestCommunicationCallback:
         
         mock_study.return_value = MagicMock()
         
-        worker = BreederWorker(config)
+        worker = SystemtenderWorker(config)
         
-        # Check that communication callback is configured for intra-breeder sharing
+        # Check that communication callback is configured for intra-systemtender sharing
         assert worker.communication_callback is not None
-        assert worker.communication_callback.share_within_breeder == True
+        assert worker.communication_callback.share_within_systemtender == True

@@ -17,9 +17,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
-from f.breeder.strains.bench_greenhouse.parameter_registry import PARAMETER_REGISTRY
+from f.systemtender.strains.bench_greenhouse.parameter_registry import PARAMETER_REGISTRY
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 

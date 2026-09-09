@@ -27,7 +27,7 @@ import random
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from scipy.stats import percentileofscore
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -37,14 +37,14 @@ class CommunicationCallback:
     def __init__(self, storage: str, share_strategy: str = "probabilistic", 
                  probability: float = 0.8, top_percentile: float = 0.2,
                  bottom_percentile: float = 0.2, min_trials_for_filtering: int = 10,
-                 share_within_breeder: bool = True):
+                 share_within_systemtender: bool = True):
         self.storage = storage
         self.share_strategy = share_strategy
         self.com_probability = probability
         self.top_percentile = top_percentile
         self.bottom_percentile = bottom_percentile
         self.min_trials_for_filtering = min_trials_for_filtering
-        self.share_within_breeder = share_within_breeder
+        self.share_within_systemtender = share_within_systemtender
         self.logger = get_logger('communication-callback')
     
     def _share_trial(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
@@ -53,9 +53,9 @@ class CommunicationCallback:
             
             for study_name in study_names:
                 if study_name != study.study_name:
-                    if not self.share_within_breeder:
-                        breeder_prefix = study.study_name.split('_')[0]
-                        if study_name.startswith(breeder_prefix):
+                    if not self.share_within_systemtender:
+                        systemtender_prefix = study.study_name.split('_')[0]
+                        if study_name.startswith(systemtender_prefix):
                             continue
                     
                     try:

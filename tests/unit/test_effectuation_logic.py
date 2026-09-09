@@ -154,7 +154,7 @@ class TestSSHEffectuation:
             ssh_module.main(context, targets, settings)
 
             call_args = mock_wmill.run_script_by_path.call_args
-            assert call_args[0][0] == 'f/breeder/strains/linux_performance/effectuate_settings'
+            assert call_args[0][0] == 'f/systemtender/strains/linux_performance/effectuate_settings'
 
 
 class TestHTTPEffectuation:
