@@ -1,32 +1,43 @@
-# godon-systemtenders
+# godon-robots
 
-Autonomous systemtender agents for optimization using metaheuristic search.
+The robot runtime of godon: autonomous workers that tend live systems — probing, holding, walking, and optimizing on shared substrates, by lease and by turn.
+
+## What a robot does
+
+One robot = one lease-holder on a live system. Its day is a cycle of bounded trials:
+
+- **Optimize** — own-work trials: apply a parameter suggestion, measure the effect, keep or roll back. Guardrails are checked before and after every push; rollback restores the prior state.
+- **Walk** — characterization: sweep a parameter axis step by step to map the system's response curve. Walks feed the atlas — the connectome of the system.
+- **Hold** — stand still during another robot's walk. Holds are cooperation, not budget spend: interference detection needs quiet receivers.
+- **Pause** — rest at the neutral point between pushes; the target becomes a sensor, not an actuator.
+
+The feeler protocol runs through all modes: touch gently (a bounded push), believe what answers (the measured effect), yield the turn (fair-share lease — acquire is denied while a walking peer has had fewer turns).
 
 ## Architecture
 
-Systemtenders are self-driving optimization agents that use **Optuna ask/tell pattern** for parameter search - further metaheuristics frameworks may follow. Effectuation and reconnaissance are executed as Windmill scripts on target systems.
+Trials are coordinated over an **Optuna database** (ask/tell storage, shared between robots). Effectuation and reconnaissance run as Windmill scripts on the target systems.
 
-The system follows an **engine + strains** architecture: the engine provides the generic optimization loop (algorithm diversity, guardrails, rollback, cooperation, metrics), while strains encapsulate domain-specific knowledge (parameter suggestion, validation).
+The system follows an **engine + strains** architecture: the engine (`engine/`) provides the generic trial loop — lifecycle, lease and turn-taking, algorithm diversity across parallel robots, guardrail checking, rollback, cooperative trial sharing, metrics — while strains (`strains/`) encapsulate domain-specific knowledge (parameter suggestion, validation).
 
 ### Engine (`engine/`)
 
-- **SystemtenderWorker**: Generic optimization agent with lifecycle management, algorithm diversity across parallel workers, guardrail checking, and rollback support
-- **Communication**: Cooperative trial sharing between systemtenders via Optuna database (probabilistic, best, worst, extremes strategies)
-- **SystemtenderMetricsClient**: Prometheus metrics pushing via Push Gateway
-- **Strain Loader**: Dynamic loading and contract validation of strain modules
+- **SystemtenderWorker** — the robot loop: lifecycle management, lease citizenship, guardrail checking, rollback support
+- **Communication** — cooperative trial sharing between robots via the shared Optuna store (probabilistic, best, worst, extremes strategies)
+- **SystemtenderMetricsClient** — Prometheus metrics via Push Gateway
+- **Strain loader** — dynamic loading and contract validation of strain modules
 
 ### Strains (`strains/`)
 
 Each strain provides domain-specific logic as a pluggable module:
-- `suggest_params(trial, settings)` — parameter suggestion for Optuna trials
+- `suggest_params(trial, settings)` — parameter suggestion for the next trial
 - `validate_config(config)` — configuration validation (preflight checks)
 
 ### Effectuation (`effectuation/`)
 
 Scripts that apply parameter changes to target systems. Each script follows the `(context, targets, settings)` interface contract:
-- `context` — static systemtender run configuration (credentials, URLs, playbook paths)
+- `context` — static robot run configuration (credentials, URLs, playbook paths)
 - `targets` — list of target systems to apply changes to
-- `settings` — the optimizer's parameter suggestions for this trial
+- `settings` — the suggested parameters for this trial
 
 Available effectuators:
 - **SSH** — applies configuration via Ansible playbooks over SSH
