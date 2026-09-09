@@ -43,11 +43,11 @@ from optuna.samplers.nsgaii import (
     VSBXCrossover
 )
 from scipy.stats import percentileofscore
-from f.breeder.engine.breeder_metrics_client import BreederMetricsClient
-from f.breeder.engine.communication import CommunicationCallback
-from f.breeder.engine.strain_loader import load_strain
+from f.systemtender.engine.systemtender_metrics_client import SystemtenderMetricsClient
+from f.systemtender.engine.communication import CommunicationCallback
+from f.systemtender.engine.strain_loader import load_strain
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -63,7 +63,7 @@ _RETRYABLE_DB_ERROR_PATTERNS = (
 )
 
 
-class BreederWorker:
+class SystemtenderWorker:
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
@@ -101,18 +101,18 @@ class BreederWorker:
         # consume it (seed-50: followers died at cap having never
         # walked).
         self._own_trials = 0
-        breeder_config = config.get('breeder', {})
+        systemtender_config = config.get('systemtender', {})
 
-        self.breeder_type = breeder_config.get('type', 'unknown_breeder')
-        self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
-        self.breeder_id = self.breeder_uuid
+        self.systemtender_type = systemtender_config.get('type', 'unknown_systemtender')
+        self.systemtender_uuid = systemtender_config.get('uuid', systemtender_config.get('name', 'unknown'))
+        self.systemtender_id = self.systemtender_uuid
 
         det_cfg = config.get('interference_detection', config.get('detection', {}))
         self._group_id = det_cfg.get('group', config.get('group', 'default'))
-        self.breeder_db_name = f"breeder_{self.breeder_uuid.replace('-', '_')}"
-        self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
+        self.systemtender_db_name = f"systemtender_{self.systemtender_uuid.replace('-', '_')}"
+        self.worker_id = f"{self.systemtender_type}_worker_{self.systemtender_uuid}"
 
-        strain_type = breeder_config.get('type', 'linux_performance')
+        strain_type = systemtender_config.get('type', 'linux_performance')
         self.strain = load_strain(strain_type)
 
         creation_ts_str = config.get('creation_ts')
@@ -126,9 +126,9 @@ class BreederWorker:
         self.communication_callback = self._setup_communication()
 
         # Initialize probe coordinator
-        from f.breeder.engine.probe_coordinator import ProbeCoordinator
+        from f.systemtender.engine.probe_coordinator import ProbeCoordinator
         self._probe_coordinator = ProbeCoordinator(
-            breeder_id=self.breeder_id,
+            systemtender_id=self.systemtender_id,
             config=self.config,
             shared_db_fn=self._with_shared_db,
             collect_upper_bounds_fn=self._collect_upper_bounds,
@@ -159,7 +159,7 @@ class BreederWorker:
         self._heartbeat_interval = 120
         self._last_metric_noise = {}
 
-        self._register_interference_breeder()
+        self._register_interference_systemtender()
 
         # Legacy spectral watermark system REMOVED.
         # Block design coordinated detection (push/pause/hold via DetectionCoordinator)
@@ -170,10 +170,10 @@ class BreederWorker:
 
         self._update_state()
 
-        self.metrics = BreederMetricsClient(
-            breeder_id=self.breeder_id,
+        self.metrics = SystemtenderMetricsClient(
+            systemtender_id=self.systemtender_id,
             worker_id=self.worker_id,
-            breeder_type=self.breeder_type
+            systemtender_type=self.systemtender_type
         )
 
     def _assign_sampler(self) -> str:
@@ -294,7 +294,7 @@ class BreederWorker:
             'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
             'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
             'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
-            'database': self.breeder_db_name
+            'database': self.systemtender_db_name
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 
@@ -376,12 +376,12 @@ class BreederWorker:
                     template[name] = midpoint
         return template
 
-    def _register_interference_breeder(self):
+    def _register_interference_systemtender(self):
         def op(conn):
             cur = conn.cursor()
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS interference_active_breeders (
-                    breeder_id VARCHAR(255) PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS interference_active_systemtenders (
+                    systemtender_id VARCHAR(255) PRIMARY KEY,
                     group_id VARCHAR(255) NOT NULL DEFAULT 'default',
                     last_seen TIMESTAMPTZ DEFAULT NOW()
                 )
@@ -389,49 +389,49 @@ class BreederWorker:
             # Migration: add group_id if missing
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'interference_active_breeders' AND column_name = 'group_id'"
+                "WHERE table_name = 'interference_active_systemtenders' AND column_name = 'group_id'"
             )
             if not cur.fetchone():
                 cur.execute(
-                    "ALTER TABLE interference_active_breeders "
+                    "ALTER TABLE interference_active_systemtenders "
                     "ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'"
                 )
             # Lease fairness bookkeeping: walk_pending declares demand for
             # the sender lease; acquire_count records turns held. Acquire
             # is denied while a walking peer has had fewer turns.
             cur.execute(
-                "ALTER TABLE interference_active_breeders "
+                "ALTER TABLE interference_active_systemtenders "
                 "ADD COLUMN IF NOT EXISTS walk_pending BOOLEAN"
             )
             cur.execute(
-                "ALTER TABLE interference_active_breeders "
+                "ALTER TABLE interference_active_systemtenders "
                 "ADD COLUMN IF NOT EXISTS acquire_count INT DEFAULT 0"
             )
-            # Standing dials: this breeder's applied params, refreshed per
+            # Standing dials: this systemtender's applied params, refreshed per
             # trial. Read by causal to stamp curve points with the ambient
             # they were measured under.
             cur.execute(
-                "ALTER TABLE interference_active_breeders "
+                "ALTER TABLE interference_active_systemtenders "
                 "ADD COLUMN IF NOT EXISTS params JSONB"
             )
             cur.execute(
-                "INSERT INTO interference_active_breeders (breeder_id, group_id, last_seen) "
-                "VALUES (%s, %s, NOW()) ON CONFLICT (breeder_id) DO UPDATE "
+                "INSERT INTO interference_active_systemtenders (systemtender_id, group_id, last_seen) "
+                "VALUES (%s, %s, NOW()) ON CONFLICT (systemtender_id) DO UPDATE "
                 "SET group_id = %s, last_seen = NOW()",
-                (self.breeder_id, self._group_id, self._group_id)
+                (self.systemtender_id, self._group_id, self._group_id)
             )
             cur.close()
         try:
-            self._with_shared_db(op, "register_interference_breeder")
+            self._with_shared_db(op, "register_interference_systemtender")
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
 
     def _publish_standing_params(self, params):
-        """Refresh this breeder's applied params in the heartbeat table.
+        """Refresh this systemtender's applied params in the heartbeat table.
 
         Per-trial UPDATE of the standing dials. The row itself is
         created by registration; this only ever updates, so it can
-        never create ghost breeders.
+        never create ghost systemtenders.
         """
         det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
         if not det_cfg or not params:
@@ -439,9 +439,9 @@ class BreederWorker:
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "UPDATE interference_active_breeders "
-                "SET params = %s, last_seen = NOW() WHERE breeder_id = %s",
-                (json.dumps(params), self.breeder_id)
+                "UPDATE interference_active_systemtenders "
+                "SET params = %s, last_seen = NOW() WHERE systemtender_id = %s",
+                (json.dumps(params), self.systemtender_id)
             )
             cur.close()
         try:
@@ -456,17 +456,17 @@ class BreederWorker:
         # Don't register if shutdown has been requested
         if self._check_shutdown_requested():
             return
-        self._register_interference_breeder()
+        self._register_interference_systemtender()
 
     def _has_active_neighbors(self) -> bool:
         def op(conn):
             cur = conn.cursor()
-            active_window = str(self._probe_coordinator.active_breeder_window)
+            active_window = str(self._probe_coordinator.active_systemtender_window)
             cur.execute(
-                "SELECT COUNT(*) FROM interference_active_breeders "
-                "WHERE group_id = %s AND breeder_id != %s "
+                "SELECT COUNT(*) FROM interference_active_systemtenders "
+                "WHERE group_id = %s AND systemtender_id != %s "
                 "AND last_seen > NOW() - INTERVAL '" + active_window + " seconds'",
-                (self._group_id, self.breeder_id)
+                (self._group_id, self.systemtender_id)
             )
             count = cur.fetchone()[0]
             cur.close()
@@ -552,9 +552,9 @@ class BreederWorker:
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
         if parallel_workers > 1:
-            study_name = f"{self.breeder_id}_{self.sampler_type}_study"
+            study_name = f"{self.systemtender_id}_{self.sampler_type}_study"
         else:
-            study_name = f"{self.breeder_id}_study"
+            study_name = f"{self.systemtender_id}_study"
 
         directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
 
@@ -597,9 +597,9 @@ class BreederWorker:
             min_trials_for_filtering = cooperation_config.get('min_trials_for_filtering', 10)
             storage = self._get_db_url()
 
-            share_within_breeder = parallel_workers > 1
+            share_within_systemtender = parallel_workers > 1
 
-            logger.info(f"Communication enabled with strategy: {share_strategy}, share_within_breeder: {share_within_breeder}")
+            logger.info(f"Communication enabled with strategy: {share_strategy}, share_within_systemtender: {share_within_systemtender}")
             if share_strategy == "probabilistic":
                 logger.info(f"  Probability: {probability}")
             else:
@@ -613,7 +613,7 @@ class BreederWorker:
                 top_percentile=top_percentile,
                 bottom_percentile=bottom_percentile,
                 min_trials_for_filtering=min_trials_for_filtering,
-                share_within_breeder=share_within_breeder
+                share_within_systemtender=share_within_systemtender
             )
         else:
             logger.info("Communication disabled")
@@ -902,7 +902,7 @@ class BreederWorker:
             logger.debug(f"Continuing: {n_trials} < {min_iterations} min iterations")
             return True
         # The iteration cap gates OWN-WORK trials: optimizing and walking
-        # spend the budget. Holding through another breeder's walk is
+        # spend the budget. Holding through another systemtender's walk is
         # cooperation and stays free (role ledger).
         if self._own_trials >= max_iterations:
             logger.info(
@@ -928,13 +928,13 @@ class BreederWorker:
     def _check_shutdown_requested(self) -> bool:
         try:
             from sqlalchemy import text
-            query = "SELECT shutdown_requested FROM breeder_state LIMIT 1;"
+            query = "SELECT shutdown_requested FROM systemtender_state LIMIT 1;"
             with self.study._storage.engine.connect() as conn:
                 result = conn.execute(text(query))
 
             row = result.fetchone()
             if row and row[0]:
-                logger.info(f"Shutdown flag is set for breeder {self.breeder_uuid}")
+                logger.info(f"Shutdown flag is set for systemtender {self.systemtender_uuid}")
                 return True
 
             return False
@@ -1004,7 +1004,7 @@ class BreederWorker:
     def _update_state(self):
         import wmill
         state = {
-            'breeder_id': self.breeder_id,
+            'systemtender_id': self.systemtender_id,
             'total_trials': len(self.study.trials),
             'study_name': self.study.study_name,
             'status': 'running'
@@ -1014,8 +1014,8 @@ class BreederWorker:
         logger.debug(f"Updated Windmill state: {state}")
 
     def run(self):
-        logger.info(f"Starting BreederWorker: {self.worker_id}")
-        logger.info(f"Breeder type: {self.breeder_type}, UUID: {self.breeder_uuid}")
+        logger.info(f"Starting SystemtenderWorker: {self.worker_id}")
+        logger.info(f"Systemtender type: {self.systemtender_type}, UUID: {self.systemtender_uuid}")
 
         self.metrics.mark_running()
         self.metrics.push()
@@ -1258,7 +1258,7 @@ class BreederWorker:
                     self._handle_guardrail_violation(params)
 
         except Exception as e:
-            logger.error(f"Breeder {self.breeder_id} failed: {e}", exc_info=True)
+            logger.error(f"Systemtender {self.systemtender_id} failed: {e}", exc_info=True)
             self._update_state()
             raise
         finally:
@@ -1266,7 +1266,7 @@ class BreederWorker:
             self.metrics.push()
 
         self._update_state()
-        logger.info(f"BreederWorker {self.worker_id} completed {len(self.study.trials)} trials")
+        logger.info(f"SystemtenderWorker {self.worker_id} completed {len(self.study.trials)} trials")
 
         if self.study.best_trials:
             logger.info(f"Found {len(self.study.best_trials)} Pareto-optimal trials")
@@ -1276,17 +1276,17 @@ class BreederWorker:
                 logger.info(f"  ... and {len(self.study.best_trials) - 3} more")
 
 
-def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
-    if breeder_id:
-        logger.info(f"Starting worker for breeder: {breeder_id}, run: {run_id}, target: {target_id}")
+def main(config: Dict[str, Any], systemtender_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
+    if systemtender_id:
+        logger.info(f"Starting worker for systemtender: {systemtender_id}, run: {run_id}, target: {target_id}")
 
-    worker = BreederWorker(config)
+    worker = SystemtenderWorker(config)
     worker.run()
 
     return {
         'worker_id': worker.worker_id,
-        'breeder_type': worker.breeder_type,
-        'breeder_id': worker.breeder_id,
+        'systemtender_type': worker.systemtender_type,
+        'systemtender_id': worker.systemtender_id,
         'run_id': run_id,
         'target_id': target_id,
         'total_trials': len(worker.study.trials),

@@ -20,7 +20,7 @@ def _config():
         'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
     }
     return {
-        'breeder': {'type': 'bench_generic', 'uuid': 'replay-1'},
+        'systemtender': {'type': 'bench_generic', 'uuid': 'replay-1'},
         'settings': {'generic': params},
         'interference_detection': {
             'group': 'bench-characterization',
@@ -45,7 +45,7 @@ def _coordinator_via_config(walk_transport=None, overrides=None):
         cfg['interference_detection']['walk_transport'] = walk_transport
     cfg['interference_detection'].update(overrides or {})
     return ProbeCoordinator(
-        breeder_id='B4',
+        systemtender_id='B4',
         config=cfg,
         shared_db_fn=lambda op, label=None: None,
         collect_upper_bounds_fn=lambda settings: [

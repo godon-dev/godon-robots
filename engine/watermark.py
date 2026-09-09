@@ -19,7 +19,7 @@
 #
 import random
 from typing import Dict, Any, Optional, List
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -73,7 +73,7 @@ class Impulse(Watermark):
     ):
         """
         Args:
-            params_config: full breeder params config (for range extraction)
+            params_config: full systemtender params config (for range extraction)
             param_configs: list of {name, lower, upper} dicts — which params
                            to impulse
             duty_cycle: fraction of trials that are impulse trials (default 2%)
@@ -184,7 +184,7 @@ def create_watermark(
     config: Dict[str, Any],
     params_config: Dict[str, Any],
     override_type: Optional[str] = None,
-    breeder_uuid: Optional[str] = None,
+    systemtender_uuid: Optional[str] = None,
 ) -> Optional[Watermark]:
     interference_config = config.get("interference_detection", {})
     if interference_config.get("mode", "inactive") != "active":

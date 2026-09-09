@@ -28,7 +28,7 @@ import statistics
 from typing import Dict, Any, List
 from requests.exceptions import ConnectionError, Timeout
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 

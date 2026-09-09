@@ -198,7 +198,7 @@ class TestValidateConfig:
         config = {'settings': {'greenhouse': {'zones': 2}}}
         mock_preflight = MagicMock()
         mock_preflight.main.return_value = {'result': 'SUCCESS'}
-        parent_mod = sys.modules['f.breeder.strains.bench_greenhouse']
+        parent_mod = sys.modules['f.systemtender.strains.bench_greenhouse']
         with patch.object(parent_mod, 'preflight', mock_preflight, create=True):
             result = validate_config(config)
             mock_preflight.main.assert_called_once_with(config)

@@ -1,6 +1,6 @@
 """Quantum yield + role ledger tests — the anti-monopoly rung.
 
-Seed-50 replay: one breeder held the lease for its entire walk while
+Seed-50 replay: one systemtender held the lease for its entire walk while
 three followers held to cap, never walking. These tests pin the cure:
 a full slice with a pending peer yields the lease (at a completed
 probe-cycle boundary only), and hold trials stop consuming the
@@ -19,7 +19,7 @@ from engine.probe_coordinator import ProbeCoordinator
 def _config(**overrides):
     params = {'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]}}
     cfg = {
-        'breeder': {'type': 'bench_generic', 'uuid': 'quantum-1'},
+        'systemtender': {'type': 'bench_generic', 'uuid': 'quantum-1'},
         'settings': {'generic': params},
         'interference_detection': {
             'group': 'bench-characterization',
@@ -39,7 +39,7 @@ def _config(**overrides):
 
 def _coordinator(**overrides):
     return ProbeCoordinator(
-        breeder_id='B4',
+        systemtender_id='B4',
         config=_config(**overrides),
         shared_db_fn=lambda op, label=None: None,
         collect_upper_bounds_fn=lambda settings: [
@@ -118,21 +118,21 @@ class TestRoleLedger:
         from unittest.mock import MagicMock
 
         stubs = {name: MagicMock() for name in [
-            'f', 'f.breeder', 'f.breeder.engine',
-            'f.breeder.engine.probe_coordinator',
-            'f.breeder.engine.breeder_metrics_client',
-            'f.breeder.engine.communication',
-            'f.breeder.engine.coverage_walk',
-            'f.breeder.engine.walk_policy',
-            'f.breeder.strains', 'f.breeder.strains.bench_generic',
-            'f.breeder.strains.bench_generic.strain',
+            'f', 'f.systemtender', 'f.systemtender.engine',
+            'f.systemtender.engine.probe_coordinator',
+            'f.systemtender.engine.systemtender_metrics_client',
+            'f.systemtender.engine.communication',
+            'f.systemtender.engine.coverage_walk',
+            'f.systemtender.engine.walk_policy',
+            'f.systemtender.strains', 'f.systemtender.strains.bench_generic',
+            'f.systemtender.strains.bench_generic.strain',
             'wmill']}
         saved = {k: sys.modules.get(k) for k in stubs}
         sys.modules.update(stubs)
         try:
-            from engine.breeder_worker import BreederWorker
+            from engine.systemtender_worker import SystemtenderWorker
             import types
-            w = BreederWorker.__new__(BreederWorker)  # skip heavy init
+            w = SystemtenderWorker.__new__(SystemtenderWorker)  # skip heavy init
             w.config = {'run': {'completion_criteria': {
                 'iterations': {'min': 10, 'max': 120}}},
                 'interference_detection': {}}
@@ -142,7 +142,7 @@ class TestRoleLedger:
             w._check_shutdown_requested = lambda: False
 
             assert w._should_continue() is True, \
-                "holding 500 trials must not stop a breeder that never worked"
+                "holding 500 trials must not stop a systemtender that never worked"
         finally:
             for k, v in saved.items():
                 if v is None:
@@ -152,6 +152,6 @@ class TestRoleLedger:
 
         w._own_trials = 130  # cap 120 exceeded by actual walking
         assert w._should_continue() is False, \
-            "130 own-work trials over a 120 cap stops the breeder"
+            "130 own-work trials over a 120 cap stops the systemtender"
 
 

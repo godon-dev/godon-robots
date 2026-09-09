@@ -18,7 +18,7 @@
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
 """
-Comprehensive Parameter Registry for linux_performance breeder.
+Comprehensive Parameter Registry for linux_performance systemtender.
 
 This registry contains commonly-tuned Linux performance parameters
 for networking, memory, CPU, and filesystem optimization.

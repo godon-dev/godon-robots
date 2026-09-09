@@ -40,43 +40,43 @@ class FakeModule:
 
 
 fake_f = MagicMock()
-fake_breeder = MagicMock()
-fake_engine = FakeModule('f.breeder.engine')
+fake_systemtender = MagicMock()
+fake_engine = FakeModule('f.systemtender.engine')
 fake_strains = MagicMock()
-fake_strains_lnx_perf = FakeModule('f.breeder.strains.linux_performance')
-fake_strains_bench_gh = FakeModule('f.breeder.strains.bench_greenhouse')
-fake_breeder_shared = MagicMock()
-fake_f.breeder = fake_breeder
-fake_breeder.engine = fake_engine
-fake_breeder.strains = fake_strains
+fake_strains_lnx_perf = FakeModule('f.systemtender.strains.linux_performance')
+fake_strains_bench_gh = FakeModule('f.systemtender.strains.bench_greenhouse')
+fake_systemtender_shared = MagicMock()
+fake_f.systemtender = fake_systemtender
+fake_systemtender.engine = fake_engine
+fake_systemtender.strains = fake_strains
 fake_strains.linux_performance = fake_strains_lnx_perf
 fake_strains.bench_greenhouse = fake_strains_bench_gh
-fake_breeder.shared = fake_breeder_shared
+fake_systemtender.shared = fake_systemtender_shared
 sys.modules['f'] = fake_f
-sys.modules['f.breeder'] = fake_breeder
-sys.modules['f.breeder.engine'] = fake_engine
-sys.modules['f.breeder.strains'] = fake_strains
-sys.modules['f.breeder.strains.linux_performance'] = fake_strains_lnx_perf
-sys.modules['f.breeder.strains.bench_greenhouse'] = fake_strains_bench_gh
-sys.modules['f.breeder.shared'] = fake_breeder_shared
+sys.modules['f.systemtender'] = fake_systemtender
+sys.modules['f.systemtender.engine'] = fake_engine
+sys.modules['f.systemtender.strains'] = fake_strains
+sys.modules['f.systemtender.strains.linux_performance'] = fake_strains_lnx_perf
+sys.modules['f.systemtender.strains.bench_greenhouse'] = fake_strains_bench_gh
+sys.modules['f.systemtender.shared'] = fake_systemtender_shared
 
 fake_otel = MagicMock()
 fake_otel.get_logger = lambda name: MagicMock()
-sys.modules['f.breeder.shared.otel_logging'] = fake_otel
+sys.modules['f.systemtender.shared.otel_logging'] = fake_otel
 
 # Pre-populate engine module stubs
-for module_name in ['breeder_worker', 'breeder_metrics_client', 'communication', 'strain_loader']:
+for module_name in ['systemtender_worker', 'systemtender_metrics_client', 'communication', 'strain_loader']:
     stub = FakeModule()
-    sys.modules[f'f.breeder.engine.{module_name}'] = stub
+    sys.modules[f'f.systemtender.engine.{module_name}'] = stub
 
 # Pre-populate strain module stubs
 for module_name in ['parameter_registry', 'preflight', 'strain']:
     stub = FakeModule()
-    sys.modules[f'f.breeder.strains.linux_performance.{module_name}'] = stub
+    sys.modules[f'f.systemtender.strains.linux_performance.{module_name}'] = stub
 
 for module_name in ['parameter_registry', 'preflight', 'strain']:
     stub = FakeModule()
-    sys.modules[f'f.breeder.strains.bench_greenhouse.{module_name}'] = stub
+    sys.modules[f'f.systemtender.strains.bench_greenhouse.{module_name}'] = stub
 
 
 def populate_stub_module(stub_module, source_module):
@@ -86,37 +86,37 @@ def populate_stub_module(stub_module, source_module):
 
 
 # Import engine modules and populate stubs (in dependency order)
-import engine.breeder_metrics_client as breeder_metrics_client
-populate_stub_module(sys.modules['f.breeder.engine.breeder_metrics_client'], breeder_metrics_client)
+import engine.systemtender_metrics_client as systemtender_metrics_client
+populate_stub_module(sys.modules['f.systemtender.engine.systemtender_metrics_client'], systemtender_metrics_client)
 
 import engine.communication as communication
-populate_stub_module(sys.modules['f.breeder.engine.communication'], communication)
+populate_stub_module(sys.modules['f.systemtender.engine.communication'], communication)
 
 import engine.strain_loader as strain_loader
-populate_stub_module(sys.modules['f.breeder.engine.strain_loader'], strain_loader)
+populate_stub_module(sys.modules['f.systemtender.engine.strain_loader'], strain_loader)
 
 # Import strain modules and populate stubs
 import strains.linux_performance.parameter_registry as parameter_registry
-populate_stub_module(sys.modules['f.breeder.strains.linux_performance.parameter_registry'], parameter_registry)
+populate_stub_module(sys.modules['f.systemtender.strains.linux_performance.parameter_registry'], parameter_registry)
 
 import strains.linux_performance.preflight as preflight
-populate_stub_module(sys.modules['f.breeder.strains.linux_performance.preflight'], preflight)
+populate_stub_module(sys.modules['f.systemtender.strains.linux_performance.preflight'], preflight)
 
 import strains.linux_performance.strain as strain
-populate_stub_module(sys.modules['f.breeder.strains.linux_performance.strain'], strain)
+populate_stub_module(sys.modules['f.systemtender.strains.linux_performance.strain'], strain)
 
 import strains.bench_greenhouse.parameter_registry as gh_parameter_registry
-populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.parameter_registry'], gh_parameter_registry)
+populate_stub_module(sys.modules['f.systemtender.strains.bench_greenhouse.parameter_registry'], gh_parameter_registry)
 
 import strains.bench_greenhouse.preflight as gh_preflight
-populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.preflight'], gh_preflight)
+populate_stub_module(sys.modules['f.systemtender.strains.bench_greenhouse.preflight'], gh_preflight)
 
 import strains.bench_greenhouse.strain as gh_strain
-populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.strain'], gh_strain)
+populate_stub_module(sys.modules['f.systemtender.strains.bench_greenhouse.strain'], gh_strain)
 
-sys.modules['f.breeder.engine.watermark'] = types.ModuleType('f.breeder.engine.watermark')
-sys.modules['f.breeder.engine.watermark'].create_watermark = lambda *a, **kw: None
-sys.modules['f.breeder.engine.watermark'].Watermark = type('Watermark', (), {})
+sys.modules['f.systemtender.engine.watermark'] = types.ModuleType('f.systemtender.engine.watermark')
+sys.modules['f.systemtender.engine.watermark'].create_watermark = lambda *a, **kw: None
+sys.modules['f.systemtender.engine.watermark'].Watermark = type('Watermark', (), {})
 
-import engine.breeder_worker as breeder_worker
-populate_stub_module(sys.modules['f.breeder.engine.breeder_worker'], breeder_worker)
+import engine.systemtender_worker as systemtender_worker
+populate_stub_module(sys.modules['f.systemtender.engine.systemtender_worker'], systemtender_worker)

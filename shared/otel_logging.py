@@ -38,7 +38,7 @@ OTEL_ENDPOINT = os.environ.get(
     "http://godon-observability-opentelemetry-collector.godon-observability.svc.cluster.local:4318"
 )
 
-_service_name = os.environ.get("OTEL_SERVICE_NAME", "godon-breeders")
+_service_name = os.environ.get("OTEL_SERVICE_NAME", "godon-systemtenders")
 _tracer = None
 _logger_provider = None
 _initialized = False

@@ -16,26 +16,26 @@ import types
 import logging
 if 'f' not in sys.modules:
     f_mod = types.ModuleType('f')
-    breeder_mod = types.ModuleType('f.breeder')
-    shared_mod = types.ModuleType('f.breeder.shared')
-    otel_mod = types.ModuleType('f.breeder.shared.otel_logging')
-    engine_mod = types.ModuleType('f.breeder.engine')
+    systemtender_mod = types.ModuleType('f.systemtender')
+    shared_mod = types.ModuleType('f.systemtender.shared')
+    otel_mod = types.ModuleType('f.systemtender.shared.otel_logging')
+    engine_mod = types.ModuleType('f.systemtender.engine')
     otel_mod.get_logger = lambda name: logging.getLogger(name)
-    f_mod.breeder = breeder_mod
-    breeder_mod.shared = shared_mod
+    f_mod.systemtender = systemtender_mod
+    systemtender_mod.shared = shared_mod
     shared_mod.otel_logging = otel_mod
-    breeder_mod.engine = engine_mod
+    systemtender_mod.engine = engine_mod
     sys.modules['f'] = f_mod
-    sys.modules['f.breeder'] = breeder_mod
-    sys.modules['f.breeder.shared'] = shared_mod
-    sys.modules['f.breeder.shared.otel_logging'] = otel_mod
-    sys.modules['f.breeder.engine'] = engine_mod
+    sys.modules['f.systemtender'] = systemtender_mod
+    sys.modules['f.systemtender.shared'] = shared_mod
+    sys.modules['f.systemtender.shared.otel_logging'] = otel_mod
+    sys.modules['f.systemtender.engine'] = engine_mod
 
-# Also make characterization importable as f.breeder.engine.characterization
+# Also make characterization importable as f.systemtender.engine.characterization
 import importlib
 try:
     char_mod = importlib.import_module('engine.characterization')
-    sys.modules['f.breeder.engine.characterization'] = char_mod
+    sys.modules['f.systemtender.engine.characterization'] = char_mod
 except ImportError:
     pass
 
@@ -48,14 +48,14 @@ def _noop_db(fn, desc):
 
 
 def _config(params=None, **overrides):
-    """Build a minimal breeder config with given params."""
+    """Build a minimal systemtender config with given params."""
     params = params or {
         'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
         'param_1': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
         'param_2': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
     }
     cfg = {
-        'breeder': {'type': 'bench_generic', 'uuid': 'test-1'},
+        'systemtender': {'type': 'bench_generic', 'uuid': 'test-1'},
         'settings': {'generic': params},
         'interference_detection': {
             'group': 'test',
@@ -94,7 +94,7 @@ def _make_coordinator(config=None, params=None, **overrides):
     _ensure_real_optuna()
     config = config or _config(params=params, **overrides)
     coord = ProbeCoordinator(
-        breeder_id='test-sender-1',
+        systemtender_id='test-sender-1',
         config=config,
         shared_db_fn=_noop_db,
         collect_upper_bounds_fn=lambda settings: _fake_upper_bounds(settings),
@@ -636,7 +636,7 @@ def test_multi_receiver_char_tell_logs_per_receiver():
 
     handler = _Capture()
     # Full-suite pollution guard: earlier test files (worker lifecycle)
-    # replace f.breeder.shared.otel_logging with a MagicMock whose
+    # replace f.systemtender.shared.otel_logging with a MagicMock whose
     # get_logger returns a Mock — the coordinator module imported under
     # that regime holds a Mock logger and emits nothing. Inject a real
     # logger for the duration of the call; order-independent.
@@ -693,37 +693,37 @@ def test_get_char_status():
     print("  PASS")
 
 
-def test_init_char_import_via_f_breeder_namespace():
+def test_init_char_import_via_f_systemtender_namespace():
     """Production namespace regression (bench-4 VOID lesson).
 
-    breeder_worker imports this module as f.breeder.engine.*; the
+    systemtender_worker imports this module as f.systemtender.engine.*; the
     sibling coverage_walk import inside _init_characterization must
-    resolve there. Block the engine.* path and prove the f.breeder
+    resolve there. Block the engine.* path and prove the f.systemtender
     path alone is sufficient.
     """
-    print("\n=== test_init_char_import_via_f_breeder_namespace ===")
+    print("\n=== test_init_char_import_via_f_systemtender_namespace ===")
     import importlib
     real = importlib.import_module('engine.coverage_walk')
-    engine_mod = sys.modules.get('f.breeder.engine') or types.ModuleType('f.breeder.engine')
-    saved_f = sys.modules.get('f.breeder.engine.coverage_walk')
+    engine_mod = sys.modules.get('f.systemtender.engine') or types.ModuleType('f.systemtender.engine')
+    saved_f = sys.modules.get('f.systemtender.engine.coverage_walk')
     saved_e = sys.modules.get('engine.coverage_walk')
-    sys.modules['f.breeder.engine'] = engine_mod
-    sys.modules['f.breeder.engine.coverage_walk'] = real
+    sys.modules['f.systemtender.engine'] = engine_mod
+    sys.modules['f.systemtender.engine.coverage_walk'] = real
     sys.modules['engine.coverage_walk'] = None  # poison fallback path
     try:
         coord = _make_coordinator()
         coord._init_characterization()
-        assert coord._char_walk is not None, "init must work via f.breeder path alone"
+        assert coord._char_walk is not None, "init must work via f.systemtender path alone"
     finally:
         if saved_e is None:
             sys.modules.pop('engine.coverage_walk', None)
         else:
             sys.modules['engine.coverage_walk'] = saved_e
         if saved_f is None:
-            sys.modules.pop('f.breeder.engine.coverage_walk', None)
+            sys.modules.pop('f.systemtender.engine.coverage_walk', None)
         else:
-            sys.modules['f.breeder.engine.coverage_walk'] = saved_f
-    print("  f.breeder path alone -> walk built — PASS")
+            sys.modules['f.systemtender.engine.coverage_walk'] = saved_f
+    print("  f.systemtender path alone -> walk built — PASS")
 
 
 def test_ask_after_all_converged():
@@ -767,7 +767,7 @@ if __name__ == '__main__':
         test_convergence_all_params_done,
         test_get_char_status,
         test_ask_after_all_converged,
-        test_init_char_import_via_f_breeder_namespace,
+        test_init_char_import_via_f_systemtender_namespace,
     ]
     passed = 0
     for fn in test_fns:
@@ -786,7 +786,7 @@ if __name__ == '__main__':
 # ─── Listening from trial 1 (warmup gate removed) ─────────────────
 
 def test_receiver_holds_from_first_trial():
-    """An active sender outranks warmup: a breeder at trial 1 with a
+    """An active sender outranks warmup: a systemtender at trial 1 with a
     leased sender must HOLD, not optimize. Regression for the startup
     race where the sender probed a receiver still inside its own
     min_optimize_trials warmup (saturation run 23, param_0@50 = -0.68)."""
@@ -885,14 +885,14 @@ def test_done_parks_at_neutral():
 
 
 def test_pure_optimizer_passes_through():
-    """A breeder without an interference_detection section is a pure
+    """A systemtender without an interference_detection section is a pure
     optimizer: the coordinator passes through, it never parks."""
     print("\n=== test_pure_optimizer_passes_through ===")
     cfg = _config()
     del cfg['interference_detection']
     coord = _make_coordinator(config=cfg)
     assert coord._coordination_enabled is False
-    coord._count_active_breeders = lambda: 1
+    coord._count_active_systemtenders = lambda: 1
     result = coord._handle_optimize(types.SimpleNamespace(number=1))
     assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
     print("  no section → optimize pass-through, no park")
@@ -907,7 +907,7 @@ def test_walk_complete_does_not_reacquire_lease():
     from unittest.mock import patch
     coord = _parked_coord()
     coord._converged_params = {'param_0', 'param_1', 'param_2'}
-    coord._count_active_breeders = lambda: 3
+    coord._count_active_systemtenders = lambda: 3
     coord._has_active_sender = lambda: False
     with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
         result = coord._handle_optimize(types.SimpleNamespace(number=5))
@@ -917,12 +917,12 @@ def test_walk_complete_does_not_reacquire_lease():
     print("  PASS")
 
 
-def test_solo_protocol_breeder_parks():
+def test_solo_protocol_systemtender_parks():
     """A protocol participant waiting for its group parks instead of
     wandering under the optimizer."""
-    print("\n=== test_solo_protocol_breeder_parks ===")
+    print("\n=== test_solo_protocol_systemtender_parks ===")
     coord = _parked_coord()
-    coord._count_active_breeders = lambda: 1
+    coord._count_active_systemtenders = lambda: 1
     result = coord._handle_optimize(types.SimpleNamespace(number=1))
     assert result['mode'] == 'hold'
     assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
@@ -1089,7 +1089,7 @@ def test_record_includes_watched_observations():
 
 def test_acquire_publishes_demand_and_carries_fair_share_guard():
     """Lease fairness (seed-47 starved self-map): acquire publishes this
-    breeder's walk demand, then denies itself while a walk-pending peer
+    systemtender's walk demand, then denies itself while a walk-pending peer
     has had fewer turns. Poll speed cannot beat the count."""
     print("\n=== test_acquire_publishes_demand_and_carries_fair_share_guard ===")
     coord = _parked_coord()
@@ -1125,7 +1125,7 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
         raise AssertionError(f"no captured query contains {fragment!r}")
 
     pub_sql, pub_params = _capture_with("walk_pending")
-    assert "interference_active_breeders" in pub_sql
+    assert "interference_active_systemtenders" in pub_sql
     assert pub_params[0] is True
 
     lease_sql, lease_params = _capture_with("NOT EXISTS")
@@ -1133,8 +1133,8 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
     assert "walk_pending IS TRUE" in lease_sql, "demand filter missing"
     assert "acquire_count" in lease_sql, "turn-count comparison missing"
     # params: (bid, want, bid, phase, gid, gid, bid, gid, bid)
-    assert lease_params[-1] == coord.breeder_id
-    assert lease_params[0] == coord.breeder_id
+    assert lease_params[-1] == coord.systemtender_id
+    assert lease_params[0] == coord.systemtender_id
     # regression (seed-47-fair incident): params count must equal
     # placeholder count — a mismatch fails every acquire at runtime
     assert lease_params.__len__() == lease_sql.count("%s"), (
@@ -1142,7 +1142,7 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
 
     bump_sql = captured["sql"][3]
     assert "acquire_count = COALESCE(acquire_count, 0) + 1" in bump_sql
-    assert captured["params"][3] == (coord.breeder_id,)
+    assert captured["params"][3] == (coord.systemtender_id,)
     print("  demand published; fair-share guard present; turn counted")
     print("  PASS")
 
@@ -1193,7 +1193,7 @@ def test_walk_complete_publishes_demand_false():
     coord = _parked_coord()
     coord._walk_pending = lambda: False
     coord._has_active_sender = lambda: False
-    coord._count_active_breeders = lambda: 3
+    coord._count_active_systemtenders = lambda: 3
     captured = {"sql": [], "params": []}
 
     class _Cur:
@@ -1260,7 +1260,7 @@ def test_denied_acquire_names_the_block():
                 return None
 
             def fetchall(self):
-                if "interference_active_breeders" in self.sql:
+                if "interference_active_systemtenders" in self.sql:
                     return [("6a1db105", 1, 3.0)]
                 return []
 
@@ -1285,7 +1285,7 @@ def test_denied_acquire_names_the_block():
     assert got is False
     denial = [l for l in logs if "denied" in l]
     assert denial, f"no denial diagnostic logged; got {logs}"
-    assert "05aa7f7d" in denial[0], "denial must name the denied breeder"
+    assert "05aa7f7d" in denial[0], "denial must name the denied systemtender"
     assert "6a1db105" in denial[0], "denial must name the blocking peer"
     print("  denial logged:", denial[0][:120])
     print("  PASS")

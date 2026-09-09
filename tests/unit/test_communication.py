@@ -236,10 +236,10 @@ class TestUnknownStrategy:
 
 class TestShareTrial:
     def test_shares_to_other_studies(self):
-        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=True)
+        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_systemtender=True)
         study = MagicMock()
-        study.study_name = 'breeder_a_tpe_study'
-        study.get_all_study_names.return_value = ['breeder_a_tpe_study', 'breeder_a_nsga2_study']
+        study.study_name = 'systemtender_a_tpe_study'
+        study.get_all_study_names.return_value = ['systemtender_a_tpe_study', 'systemtender_a_nsga2_study']
 
         cooperating = MagicMock()
         trial = MagicMock()
@@ -250,10 +250,10 @@ class TestShareTrial:
             cooperating.add_trial.assert_called_once_with(trial)
 
     def test_skips_own_study(self):
-        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=True)
+        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_systemtender=True)
         study = MagicMock()
-        study.study_name = 'breeder_a_tpe_study'
-        study.get_all_study_names.return_value = ['breeder_a_tpe_study']
+        study.study_name = 'systemtender_a_tpe_study'
+        study.get_all_study_names.return_value = ['systemtender_a_tpe_study']
 
         trial = MagicMock()
         trial.number = 1
@@ -262,8 +262,8 @@ class TestShareTrial:
             cb._share_trial(study, trial)
             mock_optuna.load_study.assert_not_called()
 
-    def test_share_within_breeder_false_skips_same_breeder(self):
-        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=False)
+    def test_share_within_systemtender_false_skips_same_systemtender(self):
+        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_systemtender=False)
         study = MagicMock()
         study.study_name = 'alpha_tpe_study'
         study.get_all_study_names.return_value = ['alpha_tpe_study', 'alpha_nsga2_study', 'beta_tpe_study']
@@ -279,10 +279,10 @@ class TestShareTrial:
             assert called_study_name == 'beta_tpe_study'
 
     def test_handles_share_failure_gracefully(self):
-        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=True)
+        cb = CommunicationCallback(storage="sqlite:///test.db", share_within_systemtender=True)
         study = MagicMock()
-        study.study_name = 'breeder_a_tpe_study'
-        study.get_all_study_names.return_value = ['breeder_a_tpe_study', 'breeder_b_study']
+        study.study_name = 'systemtender_a_tpe_study'
+        study.get_all_study_names.return_value = ['systemtender_a_tpe_study', 'systemtender_b_study']
 
         trial = MagicMock()
         trial.number = 1

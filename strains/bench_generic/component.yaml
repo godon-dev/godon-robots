@@ -1,5 +1,5 @@
 name: bench_generic_strain
-target: breeder/strains/bench_generic
+target: systemtender/strains/bench_generic
 workspace: godon
 
 scripts:
@@ -7,6 +7,6 @@ scripts:
     settings:
       summary: "Generic Bench Strain"
       description: "Domain knowledge for configurable synthetic coupling bench - parameter registry and suggestion logic for validation ground truth"
-      tag: "breeder"
+      tag: "systemtender"
 
 flows: []

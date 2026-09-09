@@ -68,7 +68,7 @@ def make_policy(transport, bounds=None, depth=3):
     return WalkPolicy(
         causal_url="http://causal:8091",
         group_id="bench-characterization",
-        breeder_id="B4",
+        systemtender_id="B4",
         refinement_depth=depth,
         param_bounds=bounds,
         transport=transport,

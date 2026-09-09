@@ -4,7 +4,7 @@
 #opentelemetry-exporter-otlp
 
 #
-# DRAFT - Not yet integrated with any breeder, no examples available
+# DRAFT - Not yet integrated with any systemtender, no examples available
 #
 # Copyright (c) 2019 Matthias Tafelmeier.
 #
@@ -29,7 +29,7 @@ import requests
 from typing import Dict, Any, List
 import wmill
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 

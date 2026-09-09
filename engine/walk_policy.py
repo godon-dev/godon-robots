@@ -15,11 +15,11 @@ geometric sweep — the safe fallback.
 
 
 class WalkPolicy:
-    def __init__(self, causal_url, group_id, breeder_id, refinement_depth,
+    def __init__(self, causal_url, group_id, systemtender_id, refinement_depth,
                  param_bounds, transport=None):
         self._url = causal_url.rstrip("/")
         self._group = group_id
-        self._breeder = breeder_id
+        self._systemtender = systemtender_id
         self._depth = refinement_depth
         self._bounds = dict(param_bounds)
         self._transport = transport or self._urllib_transport
@@ -30,7 +30,7 @@ class WalkPolicy:
     def view(self, param):
         from urllib.parse import urlencode
         qs = urlencode({"param": param, "group": self._group})
-        return self._transport("GET", f"{self._url}/walk-view/{self._breeder}?{qs}")
+        return self._transport("GET", f"{self._url}/walk-view/{self._systemtender}?{qs}")
 
     @staticmethod
     def _urllib_transport(method, url, payload=None):
@@ -121,7 +121,7 @@ class WalkPolicy:
             self._transport(
                 "POST",
                 f"{self._url}/walk-view/refine",
-                payload={"group_id": self._group, "sender_id": self._breeder,
+                payload={"group_id": self._group, "sender_id": self._systemtender,
                          "probe_param": p},
             )
 

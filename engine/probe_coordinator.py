@@ -1,7 +1,7 @@
 #
 # Copyright (c) 2019 Matthias Tafelmeier.
 #
-# AGPL-3.0 — see godon-breeders/LICENSE.
+# AGPL-3.0 — see godon-systemtenders/LICENSE.
 #
 """
 Detection/Characterization Coordinator — the one loop.
@@ -49,7 +49,7 @@ States:
   Protocol participants park at neutral whenever they are not
   pushing: DONE, cooldowns, idle waiting and hold exits all apply
   the neutral hold params — the optimizer drives params only inside
-  a push block. A breeder without an interference_detection section
+  a push block. A systemtender without an interference_detection section
   is a pure optimizer; the coordinator passes through.
 
 Coordination: group-scoped fencing-token lease in shared DB.
@@ -62,7 +62,7 @@ import statistics
 from typing import Dict, Any, Optional, List, Callable
 from datetime import datetime
 
-from f.breeder.shared.otel_logging import get_logger
+from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -70,7 +70,7 @@ logger = get_logger(__name__)
 class ProbeCoordinator:
     """Unified detection + characterization coordinator.
 
-    Called once per trial via decide_trial(). Returns what mode the breeder
+    Called once per trial via decide_trial(). Returns what mode the systemtender
     should operate in for that trial.
 
     The probe schedule is built from config constraints by default. When
@@ -89,22 +89,22 @@ class ProbeCoordinator:
     WORST_CASE_TRIAL_SECONDS = 600
     STALE_SENDER_MULTIPLIER = 5
     MAX_HOLD_TRIALS = 200
-    ACTIVE_BREEDER_WINDOW_SECONDS = 360
+    ACTIVE_SYSTEMTENDER_WINDOW_SECONDS = 360
 
     def __init__(
         self,
-        breeder_id: str,
+        systemtender_id: str,
         config: Dict[str, Any],
         shared_db_fn: Callable,
         collect_upper_bounds_fn: Callable,
         compute_neutral_params_fn: Optional[Callable] = None,
     ):
-        self.breeder_id = breeder_id
+        self.systemtender_id = systemtender_id
         self.config = config
         self._db = shared_db_fn
         self._collect_upper_bounds = collect_upper_bounds_fn
         self._compute_neutral_params_fn = compute_neutral_params_fn
-        self._breeder_db_name = f"breeder_{breeder_id.replace('-', '_')}"
+        self._systemtender_db_name = f"systemtender_{systemtender_id.replace('-', '_')}"
 
         det_cfg = config.get('interference_detection', config.get('detection', {}))
         self.group_id = det_cfg.get('group', config.get('group', 'default'))
@@ -112,14 +112,14 @@ class ProbeCoordinator:
         self.push_block_size = det_cfg.get('push_block_size', 10)
         self.pause_block_size = det_cfg.get('pause_block_size', 10)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
-        # Protocol participation is derived, not configured: a breeder
+        # Protocol participation is derived, not configured: a systemtender
         # with an interference_detection/detection section joins the
         # probe protocol and parks at neutral whenever it is not
-        # pushing. A breeder without the section is a pure optimizer —
+        # pushing. A systemtender without the section is a pure optimizer —
         # the coordinator passes through.
         self._coordination_enabled = bool(det_cfg)
-        self.active_breeder_window = det_cfg.get(
-            'active_breeder_window', self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        self.active_systemtender_window = det_cfg.get(
+            'active_systemtender_window', self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
 
         # Characterization precision — the one customer-facing knob.
         # Controls how fine to measure coupling response curves.
@@ -149,11 +149,11 @@ class ProbeCoordinator:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
-        # Quantum: the slice of probe cycles one breeder holds the lease
+        # Quantum: the slice of probe cycles one systemtender holds the lease
         # before yielding to a walk-pending peer. Yield only under
         # contention (solo walkers run to completion, zero churn).
         # One-liner for the default: at least one ladder step per turn,
-        # handoff tax <5%, full rota cycle <=20 min at 4 breeders.
+        # handoff tax <5%, full rota cycle <=20 min at 4 systemtenders.
         self.quantum_cycles = det_cfg.get('quantum_cycles', 3)
         self._stretch_cycles = 0
         self._walk_transport = det_cfg.get('walk_transport')
@@ -223,7 +223,7 @@ class ProbeCoordinator:
             )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS detection_readiness (
-                    breeder_id VARCHAR(255) PRIMARY KEY,
+                    systemtender_id VARCHAR(255) PRIMARY KEY,
                     group_id VARCHAR(255) NOT NULL DEFAULT 'default',
                     ready_for VARCHAR(50) NOT NULL,
                     ready_at TIMESTAMPTZ DEFAULT NOW()
@@ -282,14 +282,14 @@ class ProbeCoordinator:
             logger.warning(f"Failed to cleanup stale state: {e}")
 
     def _publish_demand(self, want: bool) -> None:
-        """Publish (or clear) this breeder's walk-demand flag."""
+        """Publish (or clear) this systemtender's walk-demand flag."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "UPDATE interference_active_breeders "
+                "UPDATE interference_active_systemtenders "
                 "SET walk_pending = %s, last_seen = NOW() "
-                "WHERE breeder_id = %s",
-                (want, self.breeder_id)
+                "WHERE systemtender_id = %s",
+                (want, self.systemtender_id)
             )
             cur.close()
         try:
@@ -299,16 +299,16 @@ class ProbeCoordinator:
 
     def _walk_pending_peers(self):
         """Live group members (other than us) that want to walk."""
-        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        window = str(self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
 
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "SELECT breeder_id FROM interference_active_breeders "
-                "WHERE group_id = %s AND breeder_id <> %s "
+                "SELECT systemtender_id FROM interference_active_systemtenders "
+                "WHERE group_id = %s AND systemtender_id <> %s "
                 "AND last_seen > NOW() - INTERVAL '" + window + " seconds' "
                 "AND walk_pending IS TRUE",
-                (self.group_id, self.breeder_id))
+                (self.group_id, self.systemtender_id))
             return [r[0] for r in cur.fetchall()]
 
         try:
@@ -327,15 +327,15 @@ class ProbeCoordinator:
         behind an active sender cannot publish walk_pending (they only
         publish it when attempting an acquire), so their EXISTENCE is
         the only signal the holder's yield check can rely on."""
-        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        window = str(self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
 
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "SELECT COUNT(*) FROM interference_active_breeders "
-                "WHERE group_id = %s AND breeder_id <> %s "
+                "SELECT COUNT(*) FROM interference_active_systemtenders "
+                "WHERE group_id = %s AND systemtender_id <> %s "
                 "AND last_seen > NOW() - INTERVAL '" + window + " seconds'",
-                (self.group_id, self.breeder_id))
+                (self.group_id, self.systemtender_id))
             return cur.fetchone()[0]
 
         try:
@@ -347,7 +347,7 @@ class ProbeCoordinator:
     def _try_acquire_lease(self, phase: str) -> bool:
         """Acquire the sender lease under fair-share turn taking.
 
-        Publishes this breeder's walk demand, then acquires only while no
+        Publishes this systemtender's walk demand, then acquires only while no
         walk-pending active peer has had fewer lease turns than us. Poll
         speed cannot beat the count: a starved peer always outranks a
         recently served one.
@@ -356,17 +356,17 @@ class ProbeCoordinator:
         no map-state quantity gates the acquire.
         """
         stale = self._stale_interval()
-        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        window = str(self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
         want = self._walk_pending()
 
         def op(conn):
             cur = conn.cursor()
             # Publish demand (I am a candidate while my walk has work).
             cur.execute(
-                "UPDATE interference_active_breeders "
+                "UPDATE interference_active_systemtenders "
                 "SET walk_pending = %s, last_seen = NOW() "
-                "WHERE breeder_id = %s",
-                (want, self.breeder_id)
+                "WHERE systemtender_id = %s",
+                (want, self.systemtender_id)
             )
             # Guarded acquire: free or stale lease, and no walking peer
             # with a smaller turn count.
@@ -381,18 +381,18 @@ class ProbeCoordinator:
                 "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
                 ") "
                 "AND NOT EXISTS ("
-                "SELECT 1 FROM interference_active_breeders p "
-                "WHERE p.group_id = %s AND p.breeder_id <> %s "
+                "SELECT 1 FROM interference_active_systemtenders p "
+                "WHERE p.group_id = %s AND p.systemtender_id <> %s "
                 "AND p.last_seen > NOW() - INTERVAL '" + window + " seconds' "
                 "AND p.walk_pending IS TRUE "
                 "AND COALESCE(p.acquire_count, 0) < COALESCE(("
-                "SELECT acquire_count FROM interference_active_breeders "
-                "WHERE group_id = %s AND breeder_id = %s"
+                "SELECT acquire_count FROM interference_active_systemtenders "
+                "WHERE group_id = %s AND systemtender_id = %s"
                 "), 0)"
                 ")",
-                (self.breeder_id, phase,
-                 self.group_id, self.group_id, self.breeder_id,
-                 self.group_id, self.breeder_id)
+                (self.systemtender_id, phase,
+                 self.group_id, self.group_id, self.systemtender_id,
+                 self.group_id, self.systemtender_id)
             )
             updated = cur.rowcount
             if updated == 0:
@@ -406,17 +406,17 @@ class ProbeCoordinator:
                 )
                 lease_row = cur.fetchone()
                 cur.execute(
-                    "SELECT breeder_id, COALESCE(acquire_count, 0), "
+                    "SELECT systemtender_id, COALESCE(acquire_count, 0), "
                     "EXTRACT(EPOCH FROM (NOW() - last_seen)) "
-                    "FROM interference_active_breeders "
-                    "WHERE group_id = %s AND breeder_id <> %s "
+                    "FROM interference_active_systemtenders "
+                    "WHERE group_id = %s AND systemtender_id <> %s "
                     "AND walk_pending IS TRUE",
-                    (self.group_id, self.breeder_id)
+                    (self.group_id, self.systemtender_id)
                 )
                 logger.info(
                     "Lease acquire denied for %s (phase=%s): holder=%s "
                     "heartbeat_age=%s walk_pending_peers=%s",
-                    self.breeder_id, phase,
+                    self.systemtender_id, phase,
                     lease_row[0] if lease_row else None,
                     lease_row[1] if lease_row else None,
                     cur.fetchall()
@@ -426,10 +426,10 @@ class ProbeCoordinator:
                             (self.group_id,))
                 self._lease_token = cur.fetchone()[0]
                 cur.execute(
-                    "UPDATE interference_active_breeders "
+                    "UPDATE interference_active_systemtenders "
                     "SET acquire_count = COALESCE(acquire_count, 0) + 1 "
-                    "WHERE breeder_id = %s",
-                    (self.breeder_id,)
+                    "WHERE systemtender_id = %s",
+                    (self.systemtender_id,)
                 )
             cur.close()
             return updated > 0
@@ -445,7 +445,7 @@ class ProbeCoordinator:
             cur.execute(
                 "UPDATE sender_lease SET last_heartbeat = NOW() "
                 "WHERE group_id = %s AND holder = %s AND token = %s",
-                (self.group_id, self.breeder_id, self._lease_token)
+                (self.group_id, self.systemtender_id, self._lease_token)
             )
             result = cur.rowcount > 0
             cur.close()
@@ -464,7 +464,7 @@ class ProbeCoordinator:
                 "SET holder = NULL, phase = NULL, "
                 "push_remaining = 0, pause_remaining = 0 "
                 "WHERE group_id = %s AND holder = %s AND token = %s",
-                (self.group_id, self.breeder_id, self._lease_token)
+                (self.group_id, self.systemtender_id, self._lease_token)
             )
             cur.close()
         try:
@@ -485,7 +485,7 @@ class ProbeCoordinator:
             if pause_budget is not None:
                 sets.append("pause_remaining = %s")
                 params.append(pause_budget)
-            params.extend([self.group_id, self.breeder_id, self._lease_token])
+            params.extend([self.group_id, self.systemtender_id, self._lease_token])
             cur.execute(
                 "UPDATE sender_lease SET " + ", ".join(sets) + " "
                 "WHERE group_id = %s AND holder = %s AND token = %s",
@@ -505,7 +505,7 @@ class ProbeCoordinator:
                 f"UPDATE sender_lease SET phase = %s, "
                 f"{col} = GREATEST({col} - 1, 0) "
                 "WHERE group_id = %s AND holder = %s AND token = %s",
-                (phase, self.group_id, self.breeder_id, self._lease_token)
+                (phase, self.group_id, self.systemtender_id, self._lease_token)
             )
             cur.close()
         try:
@@ -553,22 +553,22 @@ class ProbeCoordinator:
             logger.error(f"COORDINATION DB FAILURE (get_lease_phase): {e} — degrading, probe protocol compromised")
             return None
 
-    def _count_active_breeders(self) -> int:
+    def _count_active_systemtenders(self) -> int:
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "SELECT COUNT(*) FROM interference_active_breeders "
+                "SELECT COUNT(*) FROM interference_active_systemtenders "
                 "WHERE group_id = %s AND last_seen > NOW() - INTERVAL '"
-                + str(self.active_breeder_window) + " seconds'",
+                + str(self.active_systemtender_window) + " seconds'",
                 (self.group_id,)
             )
             count = cur.fetchone()[0]
             cur.close()
             return count
         try:
-            return self._db(op, "count_active_breeders")
+            return self._db(op, "count_active_systemtenders")
         except Exception as e:
-            logger.error(f"COORDINATION DB FAILURE (count_active_breeders): {e} — assuming solo; if peers exist, coordination is LOST")
+            logger.error(f"COORDINATION DB FAILURE (count_active_systemtenders): {e} — assuming solo; if peers exist, coordination is LOST")
             return 1
 
     # ─── Params ──────────────────────────────────────────────────────
@@ -663,7 +663,7 @@ class ProbeCoordinator:
 
         payload = {
             'group_id': self.group_id,
-            'sender_id': self.breeder_id,
+            'sender_id': self.systemtender_id,
             'probe_param': probe['param_name'],
             'probe_level': probe['level'],
             'push_start': self._round_push_start.isoformat(),
@@ -728,7 +728,7 @@ class ProbeCoordinator:
                 "INSERT INTO receiver_observations "
                 "(group_id, receiver_id, trial_num, objective_values, lease_phase) "
                 "VALUES (%s, %s, %s, %s, %s)",
-                (self.group_id, self.breeder_id, trial_num,
+                (self.group_id, self.systemtender_id, trial_num,
                  json.dumps(objective_values), lease_phase)
             )
             cur.close()
@@ -800,14 +800,14 @@ class ProbeCoordinator:
         within each param. Coverage is by construction — no unmeasured
         level is skipped while the walk runs.
         """
-        # Production imports this module as f.breeder.engine.* (Windmill
+        # Production imports this module as f.systemtender.engine.* (Windmill
         # repo layout); the test harness imports it as engine.*.
         try:
-            from f.breeder.engine.walk_policy import WalkPolicy
+            from f.systemtender.engine.walk_policy import WalkPolicy
         except ImportError:
             from engine.walk_policy import WalkPolicy
         try:
-            from f.breeder.engine.coverage_walk import CoverageWalk
+            from f.systemtender.engine.coverage_walk import CoverageWalk
         except ImportError:
             from engine.coverage_walk import CoverageWalk
 
@@ -846,7 +846,7 @@ class ProbeCoordinator:
         if transport is not None:
             self._char_walk = WalkPolicy(
                 causal_url=self._causal_url, group_id=self.group_id,
-                breeder_id=self.breeder_id,
+                systemtender_id=self.systemtender_id,
                 refinement_depth=self.refinement_depth,
                 param_bounds=walk_bounds, transport=transport)
             logger.info("CHAR INIT: notebook walk (injected transport)")
@@ -856,7 +856,7 @@ class ProbeCoordinator:
         else:
             policy = WalkPolicy(
                 causal_url=self._causal_url, group_id=self.group_id,
-                breeder_id=self.breeder_id,
+                systemtender_id=self.systemtender_id,
                 refinement_depth=self.refinement_depth,
                 param_bounds=walk_bounds)
             if self._param_names:
@@ -1025,7 +1025,7 @@ class ProbeCoordinator:
             self._cleanup_stale_state()
             self._initialized = True
 
-        logger.info(f"COORD trial={trial.number} state={self.state} breeder={self.breeder_id[:8]}")
+        logger.info(f"COORD trial={trial.number} state={self.state} systemtender={self.systemtender_id[:8]}")
 
         # Heartbeat for sender states
         if self.state in (self.PROBE_PUSH, self.PROBE_PAUSE):
@@ -1057,7 +1057,7 @@ class ProbeCoordinator:
         self._optimize_count += 1
 
         # Listening from trial 1: an active sender outranks everything.
-        # A breeder that exists can hold — there is no warmup before
+        # A systemtender that exists can hold — there is no warmup before
         # receiving. (The old min_optimize_trials gate let a sender
         # probe a receiver still inside its own warmup.)
         if self._has_active_sender():
@@ -1065,7 +1065,7 @@ class ProbeCoordinator:
             self._hold_count = 0
             return self._handle_hold(trial)
 
-        if self._count_active_breeders() < 2:
+        if self._count_active_systemtenders() < 2:
             return self._idle_result()
 
         # Initialize characterization walk on first entry

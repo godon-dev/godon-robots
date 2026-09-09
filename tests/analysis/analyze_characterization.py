@@ -2,13 +2,13 @@
 """
 Post-hoc characterization analysis.
 
-Reads trial data from the breeder DB, reconstructs response curves from
+Reads trial data from the systemtender DB, reconstructs response curves from
 tagged probe trials, and validates characterization quality.
 
 Usage:
   python3 analyze_characterization.py <sender_db> <receiver_db>
 
-Both args are breeder DB names (e.g. breeder_<uuid>).
+Both args are systemtender DB names (e.g. systemtender_<uuid>).
 
 Output:
   - Per-param response curves (level → receiver shift)
@@ -25,11 +25,11 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
-from f.breeder.engine.characterization import ResponseCurve
+from f.systemtender.engine.characterization import ResponseCurve
 
 
 def fetch_trials(db_name):
-    """Fetch all COMPLETE trials with user_attrs from the breeder DB."""
+    """Fetch all COMPLETE trials with user_attrs from the systemtender DB."""
     import psycopg2
     user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
     pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')

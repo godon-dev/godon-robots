@@ -1,10 +1,10 @@
 name: engine
-target: breeder/engine
+target: systemtender/engine
 workspace: godon
 
 scripts:
   - pattern: "*.py"
     settings:
-      summary: "Godon Breeder Engine"
-      description: "Generic breeder worker engine with strain-based optimization. Loads domain-specific strains for parameter suggestion and effectuation."
-      tag: "breeder"
+      summary: "Godon Systemtender Engine"
+      description: "Generic systemtender worker engine with strain-based optimization. Loads domain-specific strains for parameter suggestion and effectuation."
+      tag: "systemtender"

@@ -18,10 +18,10 @@
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
 """
-Preflight validation for linux_performance breeder.
+Preflight validation for linux_performance systemtender.
 
 This script performs semantic validation before workers are launched:
-- Validates all parameters are supported by this breeder
+- Validates all parameters are supported by this systemtender
 - Validates constraint types match parameter types
 - Returns error if config is invalid, allowing controller to fail fast
 
@@ -29,14 +29,14 @@ Called synchronously by controller before starting workers async.
 """
 
 # Import parameter registry from separate file
-from f.breeder.strains.linux_performance.parameter_registry import PARAMETER_REGISTRY, ETHTOOL_PARAMS
+from f.systemtender.strains.linux_performance.parameter_registry import PARAMETER_REGISTRY, ETHTOOL_PARAMS
 
 def main(config=None, strict_mode=True):
     """
-    Validate breeder configuration for linux_performance breeder.
+    Validate systemtender configuration for linux_performance systemtender.
 
     Args:
-        config: Breeder configuration dict
+        config: Systemtender configuration dict
         strict_mode: If True (default), reject unknown parameters.
                    If False, allow unknown parameters with warnings.
 
