@@ -923,6 +923,22 @@ class SystemtenderWorker:
             logger.info("Stopping: Shutdown requested by controller")
             return False
 
+        # Quiet-bench lever: when the characterization walk has nothing
+        # left to probe (all params converged or refinement depth spent),
+        # the tender lets itself out — finished walkers leave, the room
+        # goes still for whatever comes next (holds, wishes).
+        # Defensive form: workers in tests may lack the coordinator, and
+        # stub coordinators must not read as complete — hence the strict
+        # `is True` against a real boolean.
+        coord = getattr(self, '_probe_coordinator', None)
+        if coord is not None \
+                and getattr(coord, 'char_complete', None) is not None \
+                and coord.char_complete() is True:
+            logger.info(
+                "Stopping: characterization complete — "
+                "walks done, leaving the bench quiet")
+            return False
+
         return True
 
     def _check_shutdown_requested(self) -> bool:
