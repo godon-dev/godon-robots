@@ -1289,3 +1289,46 @@ def test_denied_acquire_names_the_block():
     assert "6a1db105" in denial[0], "denial must name the blocking peer"
     print("  denial logged:", denial[0][:120])
     print("  PASS")
+
+
+# ─── Quiet bench: char_complete ────────────────────────────────────
+
+class _FakeWalk:
+    """Minimal walk stub: only can_probe matters for char_complete."""
+
+    def __init__(self, can_probe: bool):
+        self._answer = can_probe
+
+    def can_probe(self, skip) -> bool:
+        return self._answer
+
+
+def test_char_complete_without_walk_is_false():
+    coord = _make_coordinator()
+    coord.__dict__.pop('_char_walk', None)  # pre-characterization modes
+    assert coord.char_complete() is False
+    print("  PASS")
+
+
+def test_char_complete_with_cells_left_is_false():
+    coord = _make_coordinator()
+    coord._char_walk = _FakeWalk(can_probe=True)
+    assert coord.char_complete() is False
+    print("  PASS")
+
+
+def test_char_complete_when_walk_spent_is_true():
+    coord = _make_coordinator()
+    coord._char_walk = _FakeWalk(can_probe=False)
+    assert coord.char_complete() is True
+    print("  PASS")
+
+
+def test_char_complete_ignores_converged_params():
+    coord = _make_coordinator()
+    coord._char_walk = _FakeWalk(can_probe=False)
+    coord._converged_params = {'param_0', 'param_1'}
+    # skip set carries the converged names; the stub's answer stands in
+    # for the walk's own arithmetic.
+    assert coord.char_complete() is True
+    print("  PASS")
