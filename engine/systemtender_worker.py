@@ -927,8 +927,13 @@ class SystemtenderWorker:
         # left to probe (all params converged or refinement depth spent),
         # the tender lets itself out — finished walkers leave, the room
         # goes still for whatever comes next (holds, wishes).
-        if hasattr(self._probe_coordinator, 'char_complete') \
-                and self._probe_coordinator.char_complete():
+        # Defensive form: workers in tests may lack the coordinator, and
+        # stub coordinators must not read as complete — hence the strict
+        # `is True` against a real boolean.
+        coord = getattr(self, '_probe_coordinator', None)
+        if coord is not None \
+                and getattr(coord, 'char_complete', None) is not None \
+                and coord.char_complete() is True:
             logger.info(
                 "Stopping: characterization complete — "
                 "walks done, leaving the bench quiet")
