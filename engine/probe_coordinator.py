@@ -986,6 +986,20 @@ class ProbeCoordinator:
                 logger.info("CHAR EXHAUSTED: walk complete at current floors")
                 self._refine_study()
 
+    def char_complete(self) -> bool:
+        """True when the characterization walk has nothing left to probe.
+
+        Every param either converged or the refinement depth is spent
+        (best effort accepted). Quiet-bench lever: the worker polls this
+        and lets itself out when the walks are done — finished walkers
+        leave, the room goes still.
+        """
+        walk = getattr(self, '_char_walk', None)
+        if walk is None:
+            return False
+        converged = getattr(self, '_converged_params', set())
+        return not walk.can_probe(set(converged))
+
     def _refine_study(self):
         """Halve the walk's resolution floors.
 

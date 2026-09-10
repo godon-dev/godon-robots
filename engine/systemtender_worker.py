@@ -923,6 +923,17 @@ class SystemtenderWorker:
             logger.info("Stopping: Shutdown requested by controller")
             return False
 
+        # Quiet-bench lever: when the characterization walk has nothing
+        # left to probe (all params converged or refinement depth spent),
+        # the tender lets itself out — finished walkers leave, the room
+        # goes still for whatever comes next (holds, wishes).
+        if hasattr(self._probe_coordinator, 'char_complete') \
+                and self._probe_coordinator.char_complete():
+            logger.info(
+                "Stopping: characterization complete — "
+                "walks done, leaving the bench quiet")
+            return False
+
         return True
 
     def _check_shutdown_requested(self) -> bool:
