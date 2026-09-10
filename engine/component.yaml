@@ -7,4 +7,4 @@ scripts:
     settings:
       summary: "Godon Systemtender Engine"
       description: "Generic systemtender worker engine with strain-based optimization. Loads domain-specific strains for parameter suggestion and effectuation."
-      tag: "systemtender"
+      tag: "robot"
