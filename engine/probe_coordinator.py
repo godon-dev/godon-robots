@@ -759,6 +759,18 @@ class ProbeCoordinator:
         converged = result.get('converged', False)
         param_name = probe['param_name']
 
+        # The un-converge listener: a probe that disagreed with the
+        # curve beyond bars sets causal's drift flag — the param's
+        # retirement is void, it re-enters the walk. Converged ground
+        # is never re-probed by the coverage walk, so this flag is the
+        # only thing that ever revisits it.
+        if result.get('drift'):
+            if param_name in self._converged_params:
+                logger.info(
+                    f"UN-CONVERGE: {param_name} — probe disagreed with the "
+                    f"curve beyond bars (drift flag); back into the walk")
+            self._converged_params.discard(param_name)
+
         # Two-key retirement: stability AND shape. Converged alone can
         # retire with a fat unresolved bracket (run 4's threshold edge
         # stopped at (50,62] by luck). A param retires only when

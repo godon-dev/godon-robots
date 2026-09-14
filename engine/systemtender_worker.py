@@ -1035,15 +1035,21 @@ class SystemtenderWorker:
     def _refresh_wish_status(self) -> None:
         """One GET per trial boundary: keep holding / new value / release.
         A re-plan updates the held setting in place; a miss comes with
-        precise probe hints — the override pins the coordinator's push
-        blocks to the wish's own dial so the curve section the re-plan
-        needs actually regenerates."""
+        ONE probe level — the override pins the coordinator's next push
+        block to the wish's own dial, and the same level repeats until
+        its point lands (causal derives the next from fresh evidence).
+        A release from the book is honored here: the dial reverts to
+        neutral and this tender deletes its own assignment row (its DB,
+        its pulse — nothing upstream needs to notice)."""
         if not self._wish:
             return
         plan = self._fetch_wish_plan(self._wish['wish_id'])
         if not plan:
             return
         self._wish['instruction'] = plan.get('instruction', 'hold')
+        if self._wish['instruction'] == 'release':
+            self._release_wish(delete_assignment=True)
+            return
         move = ((plan.get('plan') or {}).get('moves') or [{}])[0]
         if move.get('param') == self._wish['param'] and move.get('setting') is not None:
             if move['setting'] != self._wish['setting']:
@@ -1052,16 +1058,16 @@ class SystemtenderWorker:
                     f"{self._wish['param']} {self._wish['setting']} -> {move['setting']}"
                 )
                 self._wish['setting'] = move['setting']
-        # precise remeasure: pin the coordinator's probes to the wish's
-        # dial (a parked walker would otherwise never probe again)
+        # the walk's next level: one per refresh, re-served until its
+        # point lands (a parked walker would otherwise never probe again)
         probe = plan.get('probe')
-        if probe and probe.get('param') and probe.get('levels'):
+        if probe and probe.get('param') and probe.get('level') is not None:
             self._wish['probe'] = probe
             coord = getattr(self, '_probe_coordinator', None)
             if coord is not None and hasattr(coord, 'set_probe_override'):
-                coord.set_probe_override(probe['param'], probe['levels'])
+                coord.set_probe_override(probe['param'], [probe['level']])
 
-    def _release_wish(self) -> None:
+    def _release_wish(self, delete_assignment: bool = False) -> None:
         if not self._wish:
             return
         logger.info(f"Wish {self._wish.get('wish_id')} released — reverting to neutral")
@@ -1071,6 +1077,22 @@ class SystemtenderWorker:
                 self._execute_trial(neutral)
         except Exception as e:
             logger.warning(f"Neutral re-assertion on release failed: {e}")
+        if delete_assignment:
+            # Death by book verdict (wall, sign flip, refusal, budget):
+            # the row must go too, or the pulse's adopt-on-appearance
+            # would re-adopt the corpse on the next boundary.
+            try:
+                from sqlalchemy import text
+                with self.study._storage.engine.connect() as conn:
+                    conn.execute(
+                        text("DELETE FROM wish_assignments WHERE wish_id = :wid"),
+                        {"wid": self._wish['wish_id']},
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.warning(
+                    f"Wish assignment removal failed for "
+                    f"{self._wish.get('wish_id')}: {e}")
         self._wish = None
 
     def _check_time_budget(self, completion_criteria: dict) -> bool:
