@@ -26,6 +26,7 @@
 
 import optuna
 import json
+import os
 import random
 import hashlib
 import datetime
@@ -157,6 +158,9 @@ class SystemtenderWorker:
 
         self._last_heartbeat_ts = 0
         self._heartbeat_interval = 120
+        # Wish serving (steer mode): adopted at the pulse, held at the
+        # planned value, released to neutral. None = no wish bound.
+        self._wish = None
         self._last_metric_noise = {}
 
         self._register_interference_systemtender()
@@ -959,6 +963,105 @@ class SystemtenderWorker:
             logger.warning(f"Failed to check shutdown flag: {e}")
             return False
 
+    # ─── Wish serving (steer mode) ──────────────────────────────────────
+    # The tender knows what it holds and how it reads; causal judges,
+    # plans, and keeps the book. This side never chooses the next move:
+    # every value comes from a plan fetch, releases go to neutral.
+
+    def _causal_base_url(self) -> str:
+        det_cfg = self.config.get('detection', {})
+        return det_cfg.get(
+            'causal_url',
+            os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
+
+    def _check_wish_assignment(self) -> None:
+        """Read the wish assignment row (same archive DB as the shutdown
+        flag). Adopt on appearance, release on removal, every trial."""
+        try:
+            from sqlalchemy import text
+            with self.study._storage.engine.connect() as conn:
+                conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS wish_assignments ("
+                    "wish_id TEXT PRIMARY KEY, "
+                    "assigned_tsz DOUBLE PRECISION NOT NULL)"
+                ))
+                row = conn.execute(text(
+                    "SELECT wish_id FROM wish_assignments "
+                    "ORDER BY assigned_tsz DESC LIMIT 1"
+                )).fetchone()
+        except Exception as e:
+            logger.warning(f"Wish assignment check failed: {e}")
+            return
+
+        assigned = row[0] if row else None
+        if assigned and (self._wish is None or self._wish.get('wish_id') != assigned):
+            self._adopt_wish(assigned)
+        elif not assigned and self._wish is not None:
+            self._release_wish()
+
+    def _fetch_wish_plan(self, wish_id: str):
+        """GET the wish's page from causal's book: status, instruction,
+        plan (value + band). Read-only — the arm never posts verdicts."""
+        import urllib.request
+        url = f"{self._causal_base_url()}/steer/plan/{wish_id}"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            logger.warning(f"Wish plan fetch failed for {wish_id}: {e}")
+            return None
+
+    def _adopt_wish(self, wish_id: str) -> None:
+        plan = self._fetch_wish_plan(wish_id)
+        if not plan:
+            return
+        moves = (plan.get('plan') or {}).get('moves') or [{}]
+        move = moves[0] if moves else {}
+        param, setting = move.get('param'), move.get('setting')
+        if param is None or setting is None:
+            logger.warning(f"Wish {wish_id}: plan carries no move — staying put")
+            return
+        self._wish = {
+            'wish_id': wish_id,
+            'param': param,
+            'setting': setting,
+            'instruction': plan.get('instruction', 'hold'),
+        }
+        logger.info(
+            f"Wish {wish_id} adopted: holding {param} at {setting} "
+            f"(instruction: {self._wish['instruction']})"
+        )
+
+    def _refresh_wish_status(self) -> None:
+        """One GET per trial boundary: keep holding / new value / release.
+        A re-plan updates the held setting in place."""
+        if not self._wish:
+            return
+        plan = self._fetch_wish_plan(self._wish['wish_id'])
+        if not plan:
+            return
+        self._wish['instruction'] = plan.get('instruction', 'hold')
+        move = ((plan.get('plan') or {}).get('moves') or [{}])[0]
+        if move.get('param') == self._wish['param'] and move.get('setting') is not None:
+            if move['setting'] != self._wish['setting']:
+                logger.info(
+                    f"Wish {self._wish['wish_id']} re-planned: "
+                    f"{self._wish['param']} {self._wish['setting']} -> {move['setting']}"
+                )
+                self._wish['setting'] = move['setting']
+
+    def _release_wish(self) -> None:
+        if not self._wish:
+            return
+        logger.info(f"Wish {self._wish.get('wish_id')} released — reverting to neutral")
+        try:
+            neutral = self._compute_neutral_params()
+            if neutral:
+                self._execute_trial(neutral)
+        except Exception as e:
+            logger.warning(f"Neutral re-assertion on release failed: {e}")
+        self._wish = None
+
     def _check_time_budget(self, completion_criteria: dict) -> bool:
         import re
         timing_config = completion_criteria.get('timing', {})
@@ -1073,12 +1176,34 @@ class SystemtenderWorker:
                 params = None
 
                 try:
+                    # === Wish serving (steer mode) ===
+                    # The pulse: adopt / release / refresh at every trial
+                    # boundary — same cadence the shutdown flag rides.
+                    self._check_wish_assignment()
+                    self._refresh_wish_status()
+
                     # === Detection Coordinator ===
                     decision = self._probe_coordinator.decide_trial(trial)
+                    if self._wish and self._wish.get('instruction') == 'hold':
+                        # The wish outranks the walk: hold the planned value.
+                        # Base = the coordinator's hold params (or neutral),
+                        # with the planned setting merged onto its dial.
+                        base = decision.get('params') or self._compute_neutral_params() or {}
+                        hold_params = dict(base)
+                        hold_params[self._wish['param']] = self._wish['setting']
+                        decision = {'mode': 'hold', 'params': hold_params}
+                    elif self._wish and self._wish.get('instruction') == 'remeasure':
+                        # Keep the coordinator's probe decision — its push/
+                        # pause rounds refresh the curve causal re-plans from.
+                        pass
                     detection_mode = decision['mode']
 
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
+                    if self._wish:
+                        trial.set_user_attr('wish_id', self._wish['wish_id'])
+                        trial.set_user_attr(
+                            'role', 'hold' if detection_mode == 'hold' else 'probe')
                     if detection_mode != 'hold':
                         self._own_trials += 1
                     trial.set_user_attr('coord_state', self._probe_coordinator.get_state())
