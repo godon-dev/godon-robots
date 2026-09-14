@@ -873,6 +873,52 @@ class ProbeCoordinator:
             f"threshold={self.convergence_threshold}"
         )
 
+    # ── Probe override (precise remeasure) ────────────────────────────
+
+    def set_probe_override(self, param_name: str, levels) -> None:
+        """Pin the next push blocks to one param at the given levels —
+        the wish's precise remeasure. The lease, push/pause windows and
+        characterize calls stay this coordinator's own machinery; only
+        the WHERE of the probe is pinned. Cleared when the levels are
+        exhausted (the coverage walk then resumes)."""
+        self._probe_override = {
+            'param_name': param_name,
+            'levels': [float(l) for l in levels],
+            'idx': 0,
+        }
+
+    def _override_next_probe(self) -> Optional[Dict[str, Any]]:
+        ov = self._probe_override
+        if not ov or ov['idx'] >= len(ov['levels']):
+            self._probe_override = None
+            return None
+        level = ov['levels'][ov['idx']]
+        param_name = ov['param_name']
+        bounds = self._param_bounds.get(param_name)
+        if bounds is None:
+            # causal named a dial this strain does not carry (stale plan,
+            # renamed param): drop the override, the walk resumes — never
+            # crash the loop on a stale hint.
+            logger.warning(
+                f"Probe override param unknown to this strain: {param_name} — clearing")
+            self._probe_override = None
+            return None
+        ov['idx'] += 1
+
+        neutral = self._get_neutral_params()
+        config = dict(neutral)
+        if isinstance(config.get(param_name), list):
+            config[param_name] = [level] * len(config[param_name])
+        else:
+            config[param_name] = level
+
+        return {
+            'param_name': param_name,
+            'param_idx': bounds['idx'],
+            'level': level,
+            'config': config,
+        }
+
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
         """Advance the coverage walk: next param + level to push.
 
@@ -1148,7 +1194,15 @@ class ProbeCoordinator:
     def _handle_probe_push(self, trial) -> Dict[str, Any]:
         # First trial of a new push block: ask char study for next level
         if self._push_count == 0:
-            probe = self._ask_next_probe()
+            # Precise remeasure: a wish override pins the WHERE of the
+            # probe (the lease, push/pause windows and characterize calls
+            # stay this coordinator's own machinery). Cleared when its
+            # levels are exhausted — the coverage walk then resumes.
+            probe = None
+            if getattr(self, '_probe_override', None):
+                probe = self._override_next_probe()
+            if probe is None:
+                probe = self._ask_next_probe()
             if probe is None:
                 self.state = self.DONE
                 return self._handle_done(trial)

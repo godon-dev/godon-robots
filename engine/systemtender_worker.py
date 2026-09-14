@@ -1034,7 +1034,10 @@ class SystemtenderWorker:
 
     def _refresh_wish_status(self) -> None:
         """One GET per trial boundary: keep holding / new value / release.
-        A re-plan updates the held setting in place."""
+        A re-plan updates the held setting in place; a miss comes with
+        precise probe hints — the override pins the coordinator's push
+        blocks to the wish's own dial so the curve section the re-plan
+        needs actually regenerates."""
         if not self._wish:
             return
         plan = self._fetch_wish_plan(self._wish['wish_id'])
@@ -1049,6 +1052,14 @@ class SystemtenderWorker:
                     f"{self._wish['param']} {self._wish['setting']} -> {move['setting']}"
                 )
                 self._wish['setting'] = move['setting']
+        # precise remeasure: pin the coordinator's probes to the wish's
+        # dial (a parked walker would otherwise never probe again)
+        probe = plan.get('probe')
+        if probe and probe.get('param') and probe.get('levels'):
+            self._wish['probe'] = probe
+            coord = getattr(self, '_probe_coordinator', None)
+            if coord is not None and hasattr(coord, 'set_probe_override'):
+                coord.set_probe_override(probe['param'], probe['levels'])
 
     def _release_wish(self) -> None:
         if not self._wish:
