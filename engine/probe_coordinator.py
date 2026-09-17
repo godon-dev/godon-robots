@@ -64,6 +64,11 @@ from datetime import datetime
 
 from f.systemtender.shared.otel_logging import get_logger
 
+try:
+    from f.systemtender.engine.walk_policy import WalkViewUnavailable
+except ImportError:  # test-tree layout: repo root on sys.path
+    from engine.walk_policy import WalkViewUnavailable
+
 logger = get_logger(__name__)
 
 
@@ -1108,7 +1113,14 @@ class ProbeCoordinator:
         if walk is None:
             return False
         converged = getattr(self, '_converged_params', set())
-        return not walk.can_probe(set(converged))
+        try:
+            return not walk.can_probe(set(converged))
+        except WalkViewUnavailable as e:
+            # A slow notebook must not kill the tender (run 35224443449:
+            # one >2s view read failed the whole worker job). Not
+            # complete — the loop lives and asks again next trial.
+            logger.warning(f"CHAR COMPLETE: view unavailable ({e}) — retrying next trial")
+            return False
 
     def _refine_study(self):
         """Halve the walk's resolution floors.
@@ -1248,10 +1260,16 @@ class ProbeCoordinator:
     def _walk_pending(self) -> bool:
         """Non-advancing check: can the walk still produce a probe for
         unconverged params at the current refinement floor?"""
-        return bool(
-            self._char_walk is not None
-            and self._char_walk.can_probe(self._converged_params)
-        )
+        if self._char_walk is None:
+            return False
+        try:
+            return bool(self._char_walk.can_probe(self._converged_params))
+        except WalkViewUnavailable as e:
+            # Dark view: stay engaged (True). Parking on a dark view
+            # would falsely end the walk; the notebook is authoritative
+            # the moment it answers again.
+            logger.warning(f"WALK PENDING: view unavailable ({e}) — staying engaged")
+            return True
 
     # ── PROBE_PUSH (sender) ──────────────────────────────────────────
 
@@ -1266,7 +1284,17 @@ class ProbeCoordinator:
             if getattr(self, '_probe_override', None):
                 probe = self._override_next_probe()
             if probe is None:
-                probe = self._ask_next_probe()
+                try:
+                    probe = self._ask_next_probe()
+                except WalkViewUnavailable as e:
+                    # Dark view: park ONE trial, ask again at the next
+                    # boundary. Dying here killed whole tenders (run
+                    # 35224443449); advancing without the notebook is
+                    # guessing — both are wrong, waiting is right.
+                    logger.warning(
+                        f"PROBE ASK: view unavailable ({e}) — "
+                        f"skipping this trial boundary")
+                    return self._idle_result()
             if probe is None:
                 self.state = self.DONE
                 return self._handle_done(trial)

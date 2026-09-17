@@ -14,6 +14,17 @@ geometric sweep — the safe fallback.
 """
 
 
+class WalkViewUnavailable(RuntimeError):
+    """The notebook page could not be read THIS call — transient class
+    only (timeout, connection refused/reset). A wrong page (HTTP 4xx)
+    stays loud: that is a config break, not a blip.
+
+    Raised by view(). The run loop catches it and retries next trial;
+    only init's reachability check lets it kill anything (creation-time,
+    where loud is correct).
+    """
+
+
 class WalkPolicy:
     def __init__(self, causal_url, group_id, systemtender_id, refinement_depth,
                  param_bounds, transport=None):
@@ -30,7 +41,23 @@ class WalkPolicy:
     def view(self, param):
         from urllib.parse import urlencode
         qs = urlencode({"param": param, "group": self._group})
-        return self._transport("GET", f"{self._url}/walk-view/{self._systemtender}?{qs}")
+        try:
+            return self._transport("GET", f"{self._url}/walk-view/{self._systemtender}?{qs}")
+        except WalkViewUnavailable:
+            raise
+        except TimeoutError as e:
+            raise WalkViewUnavailable(f"view timeout: {e}") from e
+        except ConnectionError as e:
+            raise WalkViewUnavailable(f"view connection: {e}") from e
+        except OSError as e:
+            # Order matters: HTTPError subclasses URLError subclasses
+            # OSError — a 4xx page must re-raise LOUD (config break),
+            # everything network-ish (refused, reset, socket timeouts
+            # under URLError) is transient.
+            from urllib.error import HTTPError
+            if isinstance(e, HTTPError):
+                raise
+            raise WalkViewUnavailable(f"view io: {e}") from e
 
     @staticmethod
     def _urllib_transport(method, url, payload=None):

@@ -7,7 +7,7 @@ function of the view, so invocation boundaries cannot lose it.
 
 import pytest
 
-from engine.walk_policy import WalkPolicy
+from engine.walk_policy import WalkPolicy, WalkViewUnavailable
 
 
 SCEN = "scenario-junction-gate"  # naming aid only; no scenario IO here
@@ -202,13 +202,16 @@ class TestNotebook:
 class TestNoSilentFallback:
     def test_dead_causal_next_probe_raises(self):
         """No notebook, no walk — a dead causal fails the step loudly
-        instead of guessing (guessing is how thin maps were born)."""
+        instead of guessing (guessing is how thin maps were born).
+        Typed as WalkViewUnavailable since the run-loop survival fix:
+        still an exception (loud), but catchable by the worker loop so
+        one slow read cannot kill a whole tender."""
         class Dead:
             def __call__(self, method, url, payload=None):
                 raise ConnectionError("causal down")
 
         p = make_policy(Dead(), bounds={"param_0": (0.0, 100.0, False)})
-        with pytest.raises(ConnectionError):
+        with pytest.raises(WalkViewUnavailable):
             p.next_probe(set())
 
     def test_dead_causal_refine_raises(self):
