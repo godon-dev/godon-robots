@@ -378,7 +378,13 @@ class ProbeCoordinator:
                 "WHERE group_id = %s AND ("
                 "holder IS NULL "
                 "OR last_heartbeat IS NULL "
-                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds' "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM interference_active_systemtenders h "
+                "WHERE h.systemtender_id = sender_lease.holder "
+                "AND h.group_id = %s "
+                "AND h.last_seen > NOW() - INTERVAL '" + window + " seconds'"
+                ")"
                 ") "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM interference_active_systemtenders p "
@@ -391,7 +397,8 @@ class ProbeCoordinator:
                 "), 0)"
                 ")",
                 (self.systemtender_id, phase,
-                 self.group_id, self.group_id, self.systemtender_id,
+                 self.group_id, self.group_id,
+                 self.group_id, self.systemtender_id,
                  self.group_id, self.systemtender_id)
             )
             updated = cur.rowcount
@@ -513,16 +520,52 @@ class ProbeCoordinator:
         except Exception as e:
             logger.warning(f"Failed to decrement budget: {e}")
 
-    def _has_active_sender(self) -> bool:
-        stale = self._stale_interval()
+    def _refresh_presence(self) -> None:
+        """Keep this member's census row alive while parked.
+
+        HOLD trials touch nothing today; a member that stops
+        refreshing while alive starves the group's own count, the
+        < 2 active gate then idles everyone before any acquire
+        attempt, and the rota freezes permanently (run 35206141133).
+        Presence only — the demand flag stays whatever the walk last
+        published.
+        """
         def op(conn):
             cur = conn.cursor()
+            cur.execute(
+                "UPDATE interference_active_systemtenders "
+                "SET last_seen = NOW() "
+                "WHERE systemtender_id = %s",
+                (self.systemtender_id,)
+            )
+            cur.close()
+        try:
+            self._db(op, "refresh_presence")
+        except Exception as e:
+            logger.warning(f"Presence refresh failed: {e}")
+
+    def _has_active_sender(self) -> bool:
+        stale = self._stale_interval()
+        window = str(self.active_systemtender_window)
+        def op(conn):
+            cur = conn.cursor()
+            # A lease is live only while its HOLDER is: a worker that
+            # died mid-walk leaves the row held with a fresh-looking
+            # heartbeat clock for the whole staleness window, and its
+            # lost token means even its own restart cannot reclaim —
+            # the holder's census row is the death detector.
             cur.execute(
                 "SELECT count(*) FROM sender_lease "
                 "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND last_heartbeat IS NOT NULL "
-                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'",
-                (self.group_id,)
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds' "
+                "AND EXISTS ("
+                "SELECT 1 FROM interference_active_systemtenders h "
+                "WHERE h.systemtender_id = sender_lease.holder "
+                "AND h.group_id = %s "
+                "AND h.last_seen > NOW() - INTERVAL '" + window + " seconds'"
+                ")",
+                (self.group_id, self.group_id)
             )
             result = cur.fetchone()[0] > 0
             cur.close()
@@ -535,14 +578,23 @@ class ProbeCoordinator:
 
     def _get_lease_phase(self) -> Optional[str]:
         stale = self._stale_interval()
+        window = str(self.active_systemtender_window)
         def op(conn):
             cur = conn.cursor()
+            # Same liveness rule as _has_active_sender: a dead holder's
+            # phase must not gate receivers either.
             cur.execute(
                 "SELECT phase FROM sender_lease "
                 "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND last_heartbeat IS NOT NULL "
-                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'",
-                (self.group_id,)
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds' "
+                "AND EXISTS ("
+                "SELECT 1 FROM interference_active_systemtenders h "
+                "WHERE h.systemtender_id = sender_lease.holder "
+                "AND h.group_id = %s "
+                "AND h.last_seen > NOW() - INTERVAL '" + window + " seconds'"
+                ")",
+                (self.group_id, self.group_id)
             )
             row = cur.fetchone()
             cur.close()
@@ -1331,6 +1383,9 @@ class ProbeCoordinator:
             if non_converged and self._walk_pending():
                 logger.info("COOLDOWN: done — re-acquiring for more probes")
                 if self._try_acquire_lease(self.PROBE_PUSH):
+                    logger.info(
+                        "Acquired lease — re-entry via cooldown "
+                        "(walk resumes from the notebook)")
                     self.state = self.PROBE_PUSH
                     self._push_count = 0
                     return self._handle_probe_push(trial)
@@ -1341,6 +1396,9 @@ class ProbeCoordinator:
     # ── HOLD (receiver) ──────────────────────────────────────────────
 
     def _handle_hold(self, trial) -> Dict[str, Any]:
+        # A parked member is still a member: keep the census row alive
+        # or the group's own count starves and the rota freezes.
+        self._refresh_presence()
         if not self._has_active_sender():
             logger.info("HOLD: sender finished — back to OPTIMIZE")
             self.state = self.OPTIMIZE
