@@ -1332,3 +1332,56 @@ def test_char_complete_ignores_converged_params():
     # for the walk's own arithmetic.
     assert coord.char_complete() is True
     print("  PASS")
+
+
+def test_characterize_payload_rides_the_heal_flag():
+    """The healing wire: every characterize call asks causal to fold the
+    round's fresh detection into the connectome ('heal': True). The
+    coordinator stays the dumb instrument — it carries the flag, causal
+    owns the graph.
+    """
+    print("\n=== test_characterize_payload_rides_the_heal_flag ===")
+    from unittest.mock import patch
+    import json as _json
+    import urllib.request
+
+    coord = _make_coordinator()
+    coord._init_characterization()
+    coord._round_push_start = coord._round_push_start or __import__(
+        'datetime').datetime(2026, 9, 16, 12, 0, 0)
+    coord._round_pause_end = coord._round_pause_end or __import__(
+        'datetime').datetime(2026, 9, 16, 12, 1, 0)
+
+    captured = {}
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return _json.dumps({
+                'shift': 0.01, 'shift_bar': 0.05, 'z': 0.2,
+                'delta': 0.001, 'converged': True, 'gaps': [],
+                'unresolved_gaps': 0,
+                'primary_receiver': 'B', 'primary_channel': 'objective_0',
+                'receivers': {}, 'heal': [],
+            }).encode()
+
+    def _fake_urlopen(req, timeout=None):
+        captured['url'] = req.full_url
+        captured['payload'] = _json.loads(req.data.decode())
+        return _FakeResp()
+
+    probe = {'param_name': 'param_1', 'level': 50.0, 'param_idx': 1}
+    with patch.object(urllib.request, 'urlopen', _fake_urlopen):
+        result = coord._query_causal_probe_result(probe)
+
+    assert result is not None, "stubbed causal must answer"
+    assert captured['url'].endswith('/characterize'), \
+        "heal rides the characterize call, not a new endpoint"
+    assert captured['payload'].get('heal') is True, \
+        "every characterized round asks for the connectome fold-in"
+    print("  payload['heal'] = True on /characterize → PASS")

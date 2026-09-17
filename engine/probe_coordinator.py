@@ -669,6 +669,11 @@ class ProbeCoordinator:
             'push_start': self._round_push_start.isoformat(),
             'pause_end': self._round_pause_end.isoformat(),
             'convergence_threshold': self.convergence_threshold,
+            # The healing wire: every characterized round carries the
+            # fresh evidence to causal, which re-detects the listening
+            # pairs and folds positives into the connectome. Heal adds
+            # and refreshes; only a rebuild subtracts.
+            'heal': True,
         }
         bounds = self._param_bounds.get(probe['param_name'])
         if bounds:
