@@ -949,7 +949,7 @@ class SystemtenderWorker:
         try:
             from sqlalchemy import text
             query = "SELECT shutdown_requested FROM systemtender_state LIMIT 1;"
-            with self.study._storage.engine.connect() as conn:
+            with self._unwrap_storage_engine(self.study).connect() as conn:
                 result = conn.execute(text(query))
 
             row = result.fetchone()
@@ -974,12 +974,34 @@ class SystemtenderWorker:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
+    @staticmethod
+    def _unwrap_storage_engine(study):
+        """The raw RDB engine under optuna's storage wrappers.
+
+        optuna wraps RDBStorage in _CachedStorage, which delegates
+        everything EXCEPT exposes .engine — the wish pulse's SQL (the
+        assignment row, same archive DB as the shutdown flag) needs the
+        engine. Unwrap one wrapper layer; a storage with neither engine
+        nor _backend raises loudly (silence here strands wishes).
+        """
+        storage = study._storage
+        backend = getattr(storage, '_backend', None)
+        if backend is not None:
+            storage = backend
+        engine = getattr(storage, 'engine', None)
+        if engine is None:
+            raise RuntimeError(
+                f"no RDB engine reachable under storage "
+                f"{type(study._storage).__name__} — cannot read or "
+                f"clear the wish assignment row")
+        return engine
+
     def _check_wish_assignment(self) -> None:
         """Read the wish assignment row (same archive DB as the shutdown
         flag). Adopt on appearance, release on removal, every trial."""
         try:
             from sqlalchemy import text
-            with self.study._storage.engine.connect() as conn:
+            with self._unwrap_storage_engine(self.study).connect() as conn:
                 conn.execute(text(
                     "CREATE TABLE IF NOT EXISTS wish_assignments ("
                     "wish_id TEXT PRIMARY KEY, "
@@ -1083,7 +1105,7 @@ class SystemtenderWorker:
             # would re-adopt the corpse on the next boundary.
             try:
                 from sqlalchemy import text
-                with self.study._storage.engine.connect() as conn:
+                with self._unwrap_storage_engine(self.study).connect() as conn:
                     conn.execute(
                         text("DELETE FROM wish_assignments WHERE wish_id = :wid"),
                         {"wid": self._wish['wish_id']},

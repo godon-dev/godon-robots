@@ -36,6 +36,9 @@ def test_release_instruction_reverts_and_deletes_row():
                'instruction': 'hold'}
     engine, conn = _fake_engine()
     w.study = MagicMock()
+    # The unwrap path: _CachedStorage wraps RDBStorage — the engine
+    # lives on the backend (a bare storage would expose it directly).
+    w.study._storage._backend.engine = engine
     w.study._storage.engine = engine
 
     plan = {'status': 'released', 'instruction': 'release', 'plan': None}
