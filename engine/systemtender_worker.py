@@ -1376,8 +1376,7 @@ class SystemtenderWorker:
                         # poison fix) and select them as self-curve data.
                         # Parked/idle trials publish nothing.
                         obs_phase = decision.get('lease_phase') or decision.get('impulse_phase')
-                        if (obs_phase is not None
-                                and hasattr(self._probe_coordinator, 'record_receiver_observation')):
+                        if hasattr(self._probe_coordinator, 'record_receiver_observation'):
                             # Record every metric the recon read this trial —
                             # objectives AND watched observations. Channels on
                             # the causal side are whatever keys rows carry;
@@ -1388,7 +1387,18 @@ class SystemtenderWorker:
                                     oname = obj.get('name', 'unknown')
                                     if oname in metrics and oname not in obj_readings:
                                         obj_readings[oname] = metrics[oname]
-                            if obj_readings:
+                            if not obj_readings:
+                                # The publish silently skips on two gates:
+                                # a missing protocol phase, or objective
+                                # names absent from the recon's metric keys.
+                                # Both starve the wish judge. Say WHICH.
+                                logger.info(
+                                    "Receiver observation skipped: phase=%r metrics_keys=%r config_objectives=%r",
+                                    obs_phase,
+                                    sorted(metrics.keys())[:8],
+                                    [o.get('name') for o in (self.config.get('objectives') or [])][:8],
+                                )
+                            if obj_readings and obs_phase is not None:
                                 self._probe_coordinator.record_receiver_observation(
                                     trial_num=trial.number,
                                     objective_values=obj_readings,
