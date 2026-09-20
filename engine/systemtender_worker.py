@@ -1007,17 +1007,21 @@ class SystemtenderWorker:
                     "wish_id TEXT PRIMARY KEY, "
                     "assigned_tsz DOUBLE PRECISION NOT NULL)"
                 ))
+                conn.execute(text(
+                    "ALTER TABLE wish_assignments "
+                    "ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'sender'"
+                ))
                 row = conn.execute(text(
-                    "SELECT wish_id FROM wish_assignments "
+                    "SELECT wish_id, COALESCE(role, 'sender') FROM wish_assignments "
                     "ORDER BY assigned_tsz DESC LIMIT 1"
                 )).fetchone()
         except Exception as e:
             logger.warning(f"Wish assignment check failed: {e}")
             return
 
-        assigned = row[0] if row else None
+        assigned, role = (row[0], row[1]) if row else (None, None)
         if assigned and (self._wish is None or self._wish.get('wish_id') != assigned):
-            self._adopt_wish(assigned)
+            self._adopt_wish(assigned, role or 'sender')
         elif not assigned and self._wish is not None:
             self._release_wish()
 
@@ -1033,13 +1037,33 @@ class SystemtenderWorker:
             logger.warning(f"Wish plan fetch failed for {wish_id}: {e}")
             return None
 
-    def _adopt_wish(self, wish_id: str) -> None:
+    def _adopt_wish(self, wish_id: str, role: str = 'sender') -> None:
         plan = self._fetch_wish_plan(wish_id)
         if not plan:
             return
         moves = (plan.get('plan') or {}).get('moves') or [{}]
         move = moves[0] if moves else {}
         param, setting = move.get('param'), move.get('setting')
+        path = (plan.get('plan') or {}).get('path') or []
+
+        if role == 'receiver':
+            # This tender's reading is wished for, but the plan's move is
+            # the sender's dial. The receiver's whole contribution is
+            # stillness: own dials at neutral, readings published. The
+            # judge watches THIS node — a swinging self-walk would break
+            # the promise (found live Sep 20: the anchor tide).
+            self._wish = {
+                'wish_id': wish_id,
+                'instruction': 'park',
+                'param': None,
+                'setting': None,
+                'role': 'receiver',
+            }
+            logger.info(
+                f"Wish {wish_id} adopted as RECEIVER: parking at neutral, "
+                f"publishing readings for the judge"
+            )
+            return
         if param is None or setting is None:
             logger.warning(f"Wish {wish_id}: plan carries no move — staying put")
             return
@@ -1048,11 +1072,62 @@ class SystemtenderWorker:
             'param': param,
             'setting': setting,
             'instruction': plan.get('instruction', 'hold'),
+            'role': 'sender',
         }
         logger.info(
             f"Wish {wish_id} adopted: holding {param} at {setting} "
             f"(instruction: {self._wish['instruction']})"
         )
+        # Tell the receiver end: plant the row in ITS db with role
+        # 'receiver', so its pulse parks instead of probing through the
+        # promise. The sender owns the notification — the receiver's
+        # stillness is part of this wish's delivery.
+        if len(path) >= 2:
+            self._notify_wish_receiver(wish_id, path[-1])
+
+    def _notify_wish_receiver(self, wish_id: str, receiver: str) -> None:
+        import psycopg2
+        base = self._get_shared_db_url().rsplit('/', 1)[0]
+        url = f"{base}/systemtender_{receiver.replace('-', '_')}"
+        try:
+            conn = psycopg2.connect(url)
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS wish_assignments ("
+                "wish_id TEXT PRIMARY KEY, "
+                "assigned_tsz DOUBLE PRECISION NOT NULL)"
+            )
+            cur.execute(
+                "ALTER TABLE wish_assignments "
+                "ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'sender'"
+            )
+            cur.execute(
+                "INSERT INTO wish_assignments (wish_id, assigned_tsz, role) "
+                "VALUES (%s, %s, 'receiver') "
+                "ON CONFLICT (wish_id) DO UPDATE SET role = 'receiver', "
+                "assigned_tsz = EXCLUDED.assigned_tsz",
+                (wish_id, time.time()),
+            )
+            cur.close()
+            conn.close()
+            logger.info(f"Wish {wish_id}: receiver notified ({receiver[:8]})")
+        except Exception as e:
+            logger.warning(f"Wish {wish_id}: receiver notification failed: {e}")
+
+    def _release_wish_receiver_row(self, wish_id: str, receiver: str) -> None:
+        import psycopg2
+        base = self._get_shared_db_url().rsplit('/', 1)[0]
+        url = f"{base}/systemtender_{receiver.replace('-', '_')}"
+        try:
+            conn = psycopg2.connect(url)
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("DELETE FROM wish_assignments WHERE wish_id = %s", (wish_id,))
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Wish {wish_id}: receiver row cleanup failed: {e}")
 
     def _refresh_wish_status(self) -> None:
         """One GET per trial boundary: keep holding / new value / release.
@@ -1247,6 +1322,16 @@ class SystemtenderWorker:
                         hold_params = dict(base)
                         hold_params[self._wish['param']] = self._wish['setting']
                         decision = {'mode': 'hold', 'params': hold_params}
+                    elif self._wish and self._wish.get('instruction') == 'park':
+                        # The receiver's role in a wish: stillness. Own
+                        # dials at neutral, readings published with the
+                        # hold phase — the judge watches THIS node while
+                        # the sender holds. Its own probe turns would
+                        # swing the wished reading out of any honest
+                        # band (the anchor tide, Sep 20).
+                        decision = {'mode': 'hold',
+                                    'params': self._compute_neutral_params() or {},
+                                    'lease_phase': 'hold'}
                     elif self._wish and self._wish.get('instruction') == 'remeasure':
                         # Keep the coordinator's probe decision — its push/
                         # pause rounds refresh the curve causal re-plans from.
