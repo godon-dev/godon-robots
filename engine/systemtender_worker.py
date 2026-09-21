@@ -1143,7 +1143,18 @@ class SystemtenderWorker:
         plan = self._fetch_wish_plan(self._wish['wish_id'])
         if not plan:
             return
-        self._wish['instruction'] = plan.get('instruction', 'hold')
+        if self._wish.get('role') == 'receiver':
+            # The receiver's role survives the refresh: causal's
+            # instruction ('hold', 'remeasure'...) maps to park — the
+            # receiver's contribution is stillness and published
+            # readings, whatever the sender's plan says. Only a
+            # release ends the park. Without this, the first refresh
+            # flips 'park' back to the plan's 'hold' and the receiver
+            # goes silent mid-wish (found live, Sep 21).
+            instruction = plan.get('instruction', 'hold')
+            self._wish['instruction'] = 'release' if instruction == 'release' else 'park'
+        else:
+            self._wish['instruction'] = plan.get('instruction', 'hold')
         if self._wish['instruction'] == 'release':
             self._release_wish(delete_assignment=True)
             return
@@ -1314,7 +1325,8 @@ class SystemtenderWorker:
 
                     # === Detection Coordinator ===
                     decision = self._probe_coordinator.decide_trial(trial)
-                    if self._wish and self._wish.get('instruction') == 'hold':
+                    if (self._wish and self._wish.get('instruction') == 'hold'
+                            and self._wish.get('param') is not None):
                         # The wish outranks the walk: hold the planned value.
                         # Base = the coordinator's hold params (or neutral),
                         # with the planned setting merged onto its dial.
