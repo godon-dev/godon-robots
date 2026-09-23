@@ -78,10 +78,10 @@ def test_heartbeat_loop_survives_beat_failures():
     print("  PASS")
 
 
-def test_beater_thread_is_daemon():
-    print("\n=== test_beater_thread_is_daemon ===")
-    # daemon: the beat must never hold the process open — when the
-    # trial loop ends (shutdown, quiet bench), the thread dies with it
+def test_beater_thread_never_blocks_exit():
+    print("\n=== test_beater_thread_never_blocks_exit ===")
+    # the beat must never hold the process open — when the trial loop
+    # ends (shutdown, quiet bench), the thread dies with it
     w = _bare_worker()
     started = {}
 
