@@ -950,6 +950,12 @@ class SystemtenderWorker:
             from sqlalchemy import text
             query = "SELECT shutdown_requested FROM systemtender_state LIMIT 1;"
             with self._unwrap_storage_engine(self.study).connect() as conn:
+                # The same visit doubles as the heartbeat: touching the
+                # state row every pulse is the tender's "alive" signal —
+                # the controller reads the row's age before it delivers
+                # a wish here. One row, one clock (the db's own NOW()).
+                conn.execute(text(
+                    "UPDATE systemtender_state SET updated_at = NOW()"))
                 result = conn.execute(text(query))
 
             row = result.fetchone()
