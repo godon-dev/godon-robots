@@ -78,10 +78,10 @@ def test_heartbeat_loop_survives_beat_failures():
     print("  PASS")
 
 
-def test_beater_thread_is_daemon():
-    print("\n=== test_beater_thread_is_daemon ===")
-    # daemon: the beat must never hold the process open — when the
-    # trial loop ends (shutdown, quiet bench), the thread dies with it
+def test_beater_thread_never_blocks_exit():
+    print("\n=== test_beater_thread_never_blocks_exit ===")
+    # the beat must never hold the process open — when the trial loop
+    # ends (shutdown, quiet bench), the thread dies with it
     w = _bare_worker()
     started = {}
 
@@ -100,4 +100,33 @@ def test_beater_thread_is_daemon():
     assert started.get('started') is True
 
     print("  daemon beater: dies with the process, never blocks exit")
+    print("  PASS")
+
+
+def test_beat_ensures_interval_column_on_old_rows():
+    print("\n=== test_beat_ensures_interval_column_on_old_rows ===")
+    # rollout-order independence: a state row born before the interval
+    # column gets it added by the first beat, then beats normally
+    w = _bare_worker()
+
+    cur = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.execute.side_effect = [
+        Exception('column "beat_interval_secs" does not exist'),
+        None,
+        None,
+    ]
+    with patch.object(w, '_get_db_url', return_value='postgresql://t-1'), \
+            patch('psycopg2.connect', return_value=conn):
+        w._beat_once()
+
+    statements = [str(c[0][0]) for c in cur.execute.call_args_list]
+    assert any('ADD COLUMN IF NOT EXISTS beat_interval_secs' in s
+               for s in statements), "the first beat must ensure the column"
+    assert sum(1 for s in statements if 'UPDATE systemtender_state' in s) == 2
+    conn.rollback.assert_called_once()
+    conn.commit.assert_called_once()
+
+    print("  old row: column ensured, beat retried, exactly one rollback")
     print("  PASS")

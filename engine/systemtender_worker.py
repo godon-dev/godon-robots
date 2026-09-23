@@ -981,10 +981,29 @@ class SystemtenderWorker:
         try:
             conn = psycopg2.connect(self._get_db_url())
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE systemtender_state "
-                    "SET updated_at = NOW(), beat_interval_secs = %s",
-                    (self.HEARTBEAT_INTERVAL_SECS,))
+                try:
+                    cur.execute(
+                        "UPDATE systemtender_state "
+                        "SET updated_at = NOW(), beat_interval_secs = %s",
+                        (self.HEARTBEAT_INTERVAL_SECS,))
+                except Exception as e:
+                    # first beat on a state row born before this column:
+                    # ensure it, then beat again (rollout-order
+                    # independent). Message-matched, because the exact
+                    # error class differs between real psycopg2 and
+                    # test stubs.
+                    if not ('beat_interval_secs' in str(e)
+                            and 'does not exist' in str(e)):
+                        raise
+                    conn.rollback()
+                    cur.execute(
+                        "ALTER TABLE systemtender_state "
+                        "ADD COLUMN IF NOT EXISTS beat_interval_secs "
+                        "DOUBLE PRECISION")
+                    cur.execute(
+                        "UPDATE systemtender_state "
+                        "SET updated_at = NOW(), beat_interval_secs = %s",
+                        (self.HEARTBEAT_INTERVAL_SECS,))
             conn.commit()
         finally:
             if conn is not None:
