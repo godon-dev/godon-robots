@@ -31,6 +31,7 @@ import random
 import hashlib
 import datetime
 import dateutil.parser
+import threading
 import time
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
@@ -124,6 +125,8 @@ class SystemtenderWorker:
         self.sampler_type = self._assign_sampler()
 
         self.study = self._load_or_create_study()
+        # the liveness beater: a daemon thread outside the trial cadence
+        self.start_heartbeat()
         self.communication_callback = self._setup_communication()
 
         # Initialize probe coordinator
@@ -945,17 +948,53 @@ class SystemtenderWorker:
 
         return True
 
+    # ─── Liveness heartbeat ─────────────────────────────────────────────
+    # A parallel beater, deliberately OUTSIDE the trial cadence: trials
+    # can pause for minutes, so a workload-bound signal would make the
+    # "alive" window as slow as the slowest phase. This thread beats on
+    # a fixed short interval into the tender's OWN state row — one tiny
+    # UPDATE per beat, its own throwaway connection, no optuna study
+    # access, no coordination tables, no causal. The controller reads
+    # the row's age (window = multiplier x the declared interval) and
+    # refuses to deliver a wish into a house whose beat went quiet.
+
+    HEARTBEAT_INTERVAL_SECS = float(
+        os.environ.get('GODON_HEARTBEAT_INTERVAL_SECS', '10'))
+
+    def start_heartbeat(self):
+        thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True,
+            name=f"heartbeat-{getattr(self, 'systemtender_uuid', '?')[:8]}")
+        thread.start()
+
+    def _heartbeat_loop(self):
+        while True:
+            try:
+                self._beat_once()
+            except Exception as e:
+                logger.debug(f"heartbeat beat failed (retries next beat): {e}")
+            time.sleep(self.HEARTBEAT_INTERVAL_SECS)
+
+    def _beat_once(self):
+        import psycopg2
+        conn = None
+        try:
+            conn = psycopg2.connect(self._get_db_url())
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE systemtender_state "
+                    "SET updated_at = NOW(), beat_interval_secs = %s",
+                    (self.HEARTBEAT_INTERVAL_SECS,))
+            conn.commit()
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _check_shutdown_requested(self) -> bool:
         try:
             from sqlalchemy import text
             query = "SELECT shutdown_requested FROM systemtender_state LIMIT 1;"
             with self._unwrap_storage_engine(self.study).connect() as conn:
-                # The same visit doubles as the heartbeat: touching the
-                # state row every pulse is the tender's "alive" signal —
-                # the controller reads the row's age before it delivers
-                # a wish here. One row, one clock (the db's own NOW()).
-                conn.execute(text(
-                    "UPDATE systemtender_state SET updated_at = NOW()"))
                 result = conn.execute(text(query))
 
             row = result.fetchone()

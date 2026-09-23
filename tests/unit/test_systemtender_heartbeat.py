@@ -1,75 +1,103 @@
-"""The tender's heartbeat: every pulse touches its state row.
+"""The tender's liveness beater: a parallel thread, outside the trial
+cadence, touching the tender's own state row.
 
-Liveness is data-plane truth: the controller reads the state row's age
-before it delivers a wish here, so the pulse must keep the row warm —
-a wedged loop stops touching it and reads as dead, whatever the
-platform's job status claims.
+Liveness is data-plane truth on a FIXED short interval: a wedged trial
+loop must not slow the beat (false-alive), and a slow-but-working phase
+must not read as dead (false-dead). The beater touches only the
+tender's own state row over its own connection — no study, no
+coordination tables, nothing else.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from engine.systemtender_worker import SystemtenderWorker
 
 
 def _bare_worker():
-    """A worker skeleton: no loop, no config — only the steer fields."""
+    """A worker skeleton: no loop, no config — only what the beater needs."""
     w = object.__new__(SystemtenderWorker)
-    w._wish = None
-    w._probe_coordinator = None
+    w.systemtender_uuid = "t-1"
     return w
 
 
-def _fake_engine():
-    """Context-managed engine whose UPDATE we can assert on."""
-    conn = MagicMock()
-    engine = MagicMock()
-    engine.connect.return_value.__enter__.return_value = conn
-    return engine, conn
-
-
-def test_shutdown_check_touches_the_heartbeat():
-    print("\n=== test_shutdown_check_touches_the_heartbeat ===")
+def test_beat_once_touches_state_row_with_declared_interval():
+    print("\n=== test_beat_once_touches_state_row_with_declared_interval ===")
     w = _bare_worker()
-    w.systemtender_uuid = "t-1"
-    engine, conn = _fake_engine()
-    w.study = MagicMock()
-    w.study._storage._backend.engine = engine
-    w.study._storage.engine = engine
 
-    row = MagicMock()
-    row.__getitem__.return_value = False  # no shutdown requested
-    result = MagicMock()
-    result.fetchone.return_value = row
-    conn.execute.side_effect = [None, result]
+    cur = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    with patch.object(w, '_get_db_url', return_value='postgresql://t-1'), \
+            patch('psycopg2.connect', return_value=conn) as connect:
+        w._beat_once()
 
-    alive = w._check_shutdown_requested()
+    connect.assert_called_once_with('postgresql://t-1')
+    sql = str(cur.execute.call_args[0][0])
+    assert 'UPDATE systemtender_state' in sql
+    assert 'updated_at = NOW()' in sql
+    assert 'beat_interval_secs' in sql
+    assert cur.execute.call_args[0][1] == (w.HEARTBEAT_INTERVAL_SECS,)
+    conn.commit.assert_called_once()
+    conn.close.assert_called_once()
 
-    assert alive is False, "a plain heartbeat beat is not a shutdown"
-    statements = [str(c[0][0]) for c in conn.execute.call_args_list]
-    assert any("UPDATE systemtender_state" in s and "updated_at" in s
-               for s in statements), "the pulse must touch the state row"
-    assert any("SELECT shutdown_requested" in s for s in statements), \
-        "the shutdown flag read must survive unchanged"
-
-    print("  one visit, two acts: heartbeat touch + shutdown read")
+    print("  one beat: own connection, state row touched, interval declared")
     print("  PASS")
 
 
-def test_heartbeat_failure_stays_quiet():
-    print("\n=== test_heartbeat_failure_stays_quiet ===")
-    # a failing state row must not crash the pulse — the worker answers
-    # 'not shutting down' and lives to beat again (pre-existing contract)
+def test_heartbeat_loop_survives_beat_failures():
+    print("\n=== test_heartbeat_loop_survives_beat_failures ===")
+    # a failed beat is logged and retried next interval — the thread
+    # must survive db hiccups, or liveness dies with the first blip
     w = _bare_worker()
-    w.systemtender_uuid = "t-2"
-    engine, conn = _fake_engine()
-    w.study = MagicMock()
-    w.study._storage._backend.engine = engine
-    w.study._storage.engine = engine
-    conn.execute.side_effect = RuntimeError("db gone")
+    beats, sleeps = [], []
 
-    alive = w._check_shutdown_requested()
+    class Done(Exception):
+        pass
 
-    assert alive is False, "a failed check is never a shutdown"
+    def fake_beat():
+        beats.append(1)
+        raise RuntimeError('db gone')
 
-    print("  heartbeat failure degrades to 'keep running'")
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) >= 3:
+            raise Done()
+
+    with patch.object(w, '_beat_once', side_effect=fake_beat), \
+            patch.object(w, 'HEARTBEAT_INTERVAL_SECS', 0), \
+            patch('engine.systemtender_worker.time.sleep', side_effect=fake_sleep):
+        try:
+            w._heartbeat_loop()
+        except Done:
+            pass
+
+    assert len(beats) == 3, "the loop kept beating past failures"
+    assert len(sleeps) == 3, "each failed beat still waits its interval"
+
+    print("  three beats, two failures, loop alive throughout")
+    print("  PASS")
+
+
+def test_beater_thread_is_daemon():
+    print("\n=== test_beater_thread_is_daemon ===")
+    # daemon: the beat must never hold the process open — when the
+    # trial loop ends (shutdown, quiet bench), the thread dies with it
+    w = _bare_worker()
+    started = {}
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            started['daemon'] = daemon
+            started['target'] = target
+
+        def start(self):
+            started['started'] = True
+
+    with patch('engine.systemtender_worker.threading.Thread', FakeThread):
+        w.start_heartbeat()
+
+    assert started.get('daemon') is True, "the beater must be a daemon"
+    assert started.get('started') is True
+
+    print("  daemon beater: dies with the process, never blocks exit")
     print("  PASS")
