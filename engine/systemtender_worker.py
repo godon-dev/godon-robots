@@ -62,6 +62,10 @@ _RETRYABLE_DB_ERROR_PATTERNS = (
     'Transaction metadata missing',
     'Heartbeat',
     'conflict',
+    # fresh tender DB vs yugabyte relcache race: the DB is created seconds
+    # before the worker's first connections; yb's relcache init for the new
+    # db can time out transiently on any early coordination call.
+    'Relcache init connection request',
 )
 
 
