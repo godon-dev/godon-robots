@@ -319,7 +319,10 @@ class SystemtenderWorker:
         user = os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')
         host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
         port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')
-        return f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/archive_db"
+        # libpq form: this URL's only consumers are raw psycopg2.connect()
+        # calls (coordination gateway + per-receiver wish readers) — libpq
+        # can not parse the +psycopg2 dialect suffix.
+        return f"postgresql://{user}:***@{host}:{port}/archive_db"
 
     def _with_shared_db(self, fn, description: str, max_retries: int = 4):
         last_error = None
@@ -1198,7 +1201,7 @@ class SystemtenderWorker:
 
     def _notify_wish_receiver(self, wish_id: str, receiver: str) -> None:
         import psycopg2
-        base = self._get_shared_db_url().replace("postgresql+psycopg2://", "postgresql://").rsplit('/', 1)[0]
+        base = self._get_shared_db_url().rsplit('/', 1)[0]
         url = f"{base}/systemtender_{receiver.replace('-', '_')}"
         try:
             conn = psycopg2.connect(url)
@@ -1228,7 +1231,7 @@ class SystemtenderWorker:
 
     def _release_wish_receiver_row(self, wish_id: str, receiver: str) -> None:
         import psycopg2
-        base = self._get_shared_db_url().replace("postgresql+psycopg2://", "postgresql://").rsplit('/', 1)[0]
+        base = self._get_shared_db_url().rsplit('/', 1)[0]
         url = f"{base}/systemtender_{receiver.replace('-', '_')}"
         try:
             conn = psycopg2.connect(url)
