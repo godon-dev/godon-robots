@@ -30,12 +30,13 @@ Usage:
     from f.systemtender.engine.systemtender_metrics_client import SystemtenderMetricsClient
 
     metrics = SystemtenderMetricsClient(systemtender_id='abc-123', worker_id='worker_1', systemtender_type='linux_performance')
-    metrics.mark_running()
+    metrics.purge_stale_series()
     metrics.inc_trial('complete', value=0.85)
     metrics.push()
 """
 
 import os
+import urllib.request
 from typing import Optional
 from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram, push_to_gateway
 
@@ -65,13 +66,9 @@ class SystemtenderMetricsClient:
         logger.debug(f"Initialized {self.__class__.__name__} for {systemtender_id}/{worker_id}")
 
     def _init_metrics(self):
-        self._worker_status = Gauge(
-            'godon_systemtender_worker_status',
-            'Systemtender worker running status',
-            ['systemtender_id', 'worker_id', 'systemtender_type', 'status'],
-            registry=self.registry
-        )
-
+        # state gauges live on the pushgateway only as last-announcement
+        # fossils (nothing overwrites them when a worker dies hard) —
+        # status truth is the controller GET, counters stay here.
         self._trial_count = Counter(
             'godon_systemtender_trials_total',
             'Total trials executed',
@@ -152,37 +149,20 @@ class SystemtenderMetricsClient:
             logger.warning(f"Failed to push metrics to {self.pushgateway_url}: {e}")
             return False
 
-    def mark_running(self):
-        if not self.enabled:
-            return
-        self._worker_status.labels(
-            systemtender_id=self.systemtender_id,
-            worker_id=self.worker_id,
-            systemtender_type=self.systemtender_type,
-            status='running'
-        ).set(1)
-        self._worker_status.labels(
-            systemtender_id=self.systemtender_id,
-            worker_id=self.worker_id,
-            systemtender_type=self.systemtender_type,
-            status='stopped'
-        ).set(0)
+    def purge_stale_series(self):
+        """Best-effort DELETE of this job's pushgateway group.
 
-    def mark_stopped(self):
+        Clears fossils from earlier runs (state gauges of dead workers
+        are never overwritten by the gateway itself). Counters restart
+        per run anyway, so the group loses nothing.
+        """
         if not self.enabled:
             return
-        self._worker_status.labels(
-            systemtender_id=self.systemtender_id,
-            worker_id=self.worker_id,
-            systemtender_type=self.systemtender_type,
-            status='running'
-        ).set(0)
-        self._worker_status.labels(
-            systemtender_id=self.systemtender_id,
-            worker_id=self.worker_id,
-            systemtender_type=self.systemtender_type,
-            status='stopped'
-        ).set(1)
+        try:
+            url = f"{self.pushgateway_url.rstrip('/')}/metrics/job/systemtender_{self.systemtender_id}"
+            urllib.request.urlopen(urllib.request.Request(url, method='DELETE'), timeout=5)
+        except Exception as e:
+            logger.debug(f"pushgateway group purge skipped: {e}")
 
     def inc_trial(self, state: str, value: Optional[float] = None):
         if not self.enabled:

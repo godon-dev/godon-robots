@@ -1011,6 +1011,45 @@ class SystemtenderWorker:
             if conn is not None:
                 conn.close()
 
+    def _stamp_finished(self):
+        """Declare the walk's end in the tender's own state table.
+
+        The one declared terminal fact: budget/time/shutdown exits all
+        land here. A killed worker stamps nothing — readers then fall
+        back to heartbeat age (presumed dead). Best-effort: a dying
+        worker must never hang on this.
+        """
+        import psycopg2
+        conn = None
+        try:
+            conn = psycopg2.connect(self._get_db_url())
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        "UPDATE systemtender_state "
+                        "SET finished_at = NOW()")
+                except Exception as e:
+                    # state row born before this column: ensure it, then
+                    # stamp (rollout-order independent)
+                    if not ('finished_at' in str(e)
+                            and 'does not exist' in str(e)):
+                        raise
+                    conn.rollback()
+                    cur.execute(
+                        "ALTER TABLE systemtender_state "
+                        "ADD COLUMN IF NOT EXISTS finished_at "
+                        "TIMESTAMPTZ")
+                    cur.execute(
+                        "UPDATE systemtender_state "
+                        "SET finished_at = NOW()")
+            conn.commit()
+            logger.info(f"Stamped finished_at for systemtender {self.systemtender_id}")
+        except Exception as e:
+            logger.warning(f"finished stamp failed (non-fatal): {e}")
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _check_shutdown_requested(self) -> bool:
         try:
             from sqlalchemy import text
@@ -1343,7 +1382,7 @@ class SystemtenderWorker:
         logger.info(f"Starting SystemtenderWorker: {self.worker_id}")
         logger.info(f"Systemtender type: {self.systemtender_type}, UUID: {self.systemtender_uuid}")
 
-        self.metrics.mark_running()
+        self.metrics.purge_stale_series()
         self.metrics.push()
 
         trial_count = 0
@@ -1631,7 +1670,7 @@ class SystemtenderWorker:
             self._update_state()
             raise
         finally:
-            self.metrics.mark_stopped()
+            self._stamp_finished()
             self.metrics.push()
 
         self._update_state()

@@ -87,26 +87,21 @@ class TestMetricCreation:
     @patch('engine.systemtender_metrics_client.Gauge')
     @patch('engine.systemtender_metrics_client.Counter')
     @patch('engine.systemtender_metrics_client.Histogram')
-    def test_worker_status_metric_created(self, mock_histogram, mock_counter, mock_gauge, mock_registry, mock_push):
-        """Test worker status Gauge metric is created"""
-        mock_registry_instance = MagicMock()
-        mock_registry.return_value = mock_registry_instance
+    def test_state_gauge_not_created(self, mock_histogram, mock_counter, mock_gauge, mock_registry, mock_push):
+        """The state gauge is retired: status truth is the controller GET.
 
-        mock_gauge_instance = MagicMock()
-        mock_gauge.return_value = mock_gauge_instance
-
+        A pushgateway state gauge is a last-announcement fossil — it
+        reads running=1 forever after a hard death. Counters stay.
+        """
         client = SystemtenderMetricsClient(
             systemtender_id='test-systemtender-123',
             worker_id='test-worker-1',
             systemtender_type='linux_performance'
         )
 
-        # Verify Gauge was created for worker status
-        assert mock_gauge.call_count >= 1  # At least one Gauge created
-
-        # Check that worker status gauge was created with correct labels
         gauge_calls = [str(call) for call in mock_gauge.call_args_list]
-        assert any('godon_systemtender_worker_status' in str(call) for call in gauge_calls)
+        assert not any('godon_systemtender_worker_status' in str(call) for call in gauge_calls)
+        assert not hasattr(client, '_worker_status')
 
     @patch('engine.systemtender_metrics_client.push_to_gateway')
     @patch('engine.systemtender_metrics_client.CollectorRegistry')
@@ -180,32 +175,23 @@ class TestMetricMethods:
 
     @patch('engine.systemtender_metrics_client.push_to_gateway')
     @patch('engine.systemtender_metrics_client.CollectorRegistry')
-    @patch('engine.systemtender_metrics_client.Gauge')
-    def test_mark_running_stopped(self, mock_gauge, mock_registry, mock_push):
-        """Test mark_running and mark_stopped"""
-        mock_registry_instance = MagicMock()
-        mock_registry.return_value = mock_registry_instance
-
-        mock_gauge_instance = MagicMock()
-        mock_gauge.return_value = mock_gauge_instance
-
+    @patch('engine.systemtender_metrics_client.urllib.request.urlopen')
+    def test_purge_stale_series(self, mock_urlopen, mock_registry, mock_push):
+        """purge_stale_series DELETEs the job group; errors are swallowed"""
         client = SystemtenderMetricsClient(
             systemtender_id='test-systemtender-123',
             worker_id='test-worker-1',
             systemtender_type='linux_performance'
         )
 
-        # Mark as running
-        client.mark_running()
+        client.purge_stale_series()
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_method() == 'DELETE'
+        assert 'systemtender_test-systemtender-123' in req.full_url
 
-        # Verify running=1, stopped=0
-        assert mock_gauge_instance.labels.call_count == 2  # running and stopped
-
-        # Mark as stopped
-        client.mark_stopped()
-
-        # Should have 4 more calls (running=0, stopped=1)
-        assert mock_gauge_instance.labels.call_count == 4
+        mock_urlopen.side_effect = OSError("gateway down")
+        client.purge_stale_series()  # must not raise
 
 
 class TestPushToGateway:

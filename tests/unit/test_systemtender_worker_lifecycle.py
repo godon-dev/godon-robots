@@ -453,8 +453,7 @@ class TestRunLoop:
 
         with patch.object(worker, 'metrics') as mock_metrics:
             worker.run()
-            mock_metrics.mark_running.assert_called_once()
-            mock_metrics.mark_stopped.assert_called_once()
+            mock_metrics.purge_stale_series.assert_called_once()
             mock_metrics.push.assert_called()
 
     def test_run_shares_trial_with_communication(self):
