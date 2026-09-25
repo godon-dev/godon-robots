@@ -8,3 +8,8 @@ scripts:
       summary: "Godon Systemtender Engine"
       description: "Generic systemtender worker engine with strain-based optimization. Loads domain-specific strains for parameter suggestion and effectuation."
       tag: "robot"
+      # windmill is our job fabric, not our lifecycle policy: the tender's
+      # end is declared by the worker itself and bounded by the cell
+      # watchdog. This ceiling only exists so a windmill-side default can
+      # never assassinate a mid-walk worker again.
+      timeout: 2147483647
