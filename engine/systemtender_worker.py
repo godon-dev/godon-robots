@@ -307,6 +307,12 @@ class SystemtenderWorker:
         # bare postgresql:// to psycopg(3), which the env does not ship.
         return f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 
+    def _get_libpq_url(self):
+        """The optuna/SQLA URL carries the +psycopg2 dialect suffix; raw
+        psycopg2.connect() needs plain libpq form (invalid dsn otherwise).
+        """
+        return self._get_db_url().replace("postgresql+psycopg2://", "postgresql://")
+
     def _get_shared_db_url(self) -> str:
         import os
         pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'postgres')
@@ -981,7 +987,7 @@ class SystemtenderWorker:
         import psycopg2
         conn = None
         try:
-            conn = psycopg2.connect(self._get_db_url())
+            conn = psycopg2.connect(self._get_libpq_url())
             with conn.cursor() as cur:
                 try:
                     cur.execute(
@@ -1022,7 +1028,7 @@ class SystemtenderWorker:
         import psycopg2
         conn = None
         try:
-            conn = psycopg2.connect(self._get_db_url())
+            conn = psycopg2.connect(self._get_libpq_url())
             with conn.cursor() as cur:
                 try:
                     cur.execute(
@@ -1192,7 +1198,7 @@ class SystemtenderWorker:
 
     def _notify_wish_receiver(self, wish_id: str, receiver: str) -> None:
         import psycopg2
-        base = self._get_shared_db_url().rsplit('/', 1)[0]
+        base = self._get_shared_db_url().replace("postgresql+psycopg2://", "postgresql://").rsplit('/', 1)[0]
         url = f"{base}/systemtender_{receiver.replace('-', '_')}"
         try:
             conn = psycopg2.connect(url)
@@ -1222,7 +1228,7 @@ class SystemtenderWorker:
 
     def _release_wish_receiver_row(self, wish_id: str, receiver: str) -> None:
         import psycopg2
-        base = self._get_shared_db_url().rsplit('/', 1)[0]
+        base = self._get_shared_db_url().replace("postgresql+psycopg2://", "postgresql://").rsplit('/', 1)[0]
         url = f"{base}/systemtender_{receiver.replace('-', '_')}"
         try:
             conn = psycopg2.connect(url)
