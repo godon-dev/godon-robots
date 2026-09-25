@@ -559,6 +559,16 @@ class TestPublishStandingParams:
         assert _json.loads(args[0]) == {'param_0': 50.0}
         assert args[1] == worker.systemtender_id
 
+    def test_relcache_timeout_is_retryable(self):
+        """Fresh tender DB vs yugabyte relcache race (live 2026-09-25,
+        cell 36158079097): a coordination call timed out on relcache init
+        ~61s into the walk and the worker died. The signature must be
+        classified retryable so the gateway backs off instead."""
+        err = Exception('connection to server at "yb-tservers" (10.0.0.1), '
+                        'port 5433 failed: FATAL:  Relcache init connection '
+                        'request to database systemtender_x timed out')
+        assert SystemtenderWorker._is_retryable_error(err) is True
+
     def test_skips_without_detection_section(self):
         worker = _create_worker()  # base config: pure optimizer
         called = []
