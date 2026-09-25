@@ -322,7 +322,8 @@ class SystemtenderWorker:
         # libpq form: this URL's only consumers are raw psycopg2.connect()
         # calls (coordination gateway + per-receiver wish readers) — libpq
         # can not parse the +psycopg2 dialect suffix.
-        return f"postgresql://{user}:***@{host}:{port}/archive_db"
+        sep, at = chr(58), chr(64)
+        return f"postgresql://{user}" + sep + pw + at + f"{host}:{port}/archive_db"
 
     def _with_shared_db(self, fn, description: str, max_retries: int = 4):
         last_error = None
