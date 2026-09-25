@@ -303,7 +303,9 @@ class SystemtenderWorker:
             'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
             'database': self.systemtender_db_name
         }
-        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        # dialect pinned explicitly: sqlalchemy>=2.1 (2026-09-24) resolves
+        # bare postgresql:// to psycopg(3), which the env does not ship.
+        return f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 
     def _get_shared_db_url(self) -> str:
         import os
@@ -311,7 +313,7 @@ class SystemtenderWorker:
         user = os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')
         host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
         port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')
-        return f"postgresql://{user}:{pw}@{host}:{port}/archive_db"
+        return f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/archive_db"
 
     def _with_shared_db(self, fn, description: str, max_retries: int = 4):
         last_error = None
