@@ -66,6 +66,12 @@ _RETRYABLE_DB_ERROR_PATTERNS = (
     # before the worker's first connections; yb's relcache init for the new
     # db can time out transiently on any early coordination call.
     'Relcache init connection request',
+    # yb mid-run transient: transactions aborted server-side fail every
+    # fresh-connection write for tens of seconds. Case differs from
+    # 'Transaction aborted' above, so that entry never matched the
+    # observed message (run 36261279551, 2026-09-26: two living workers
+    # stamped presumed_dead while beats and study commits bounced).
+    'expired or aborted',
 )
 
 
@@ -986,10 +992,34 @@ class SystemtenderWorker:
     def _heartbeat_loop(self):
         while True:
             try:
-                self._beat_once()
+                self._beat_with_burst()
             except Exception as e:
                 logger.debug(f"heartbeat beat failed (retries next beat): {e}")
             time.sleep(self.HEARTBEAT_INTERVAL_SECS)
+
+    def _beat_with_burst(self):
+        """One beat, with a short fresh-connection retry burst.
+
+        yb abort bursts (server-side transaction expiry) silence beats
+        for tens of seconds; each beat already opens a fresh connection,
+        so a burst is survived by quick retries inside the same beat
+        slot instead of conceding the thump and waiting a full interval.
+        """
+        try:
+            self._beat_once()
+            return
+        except Exception as e:
+            if not self._is_retryable_error(e):
+                raise
+            last = e
+        for _attempt in range(3):
+            time.sleep(1)
+            try:
+                self._beat_once()
+                return
+            except Exception as retry_exc:
+                last = retry_exc
+        logger.warning(f"heartbeat burst lost after retries: {last}")
 
     def _beat_once(self):
         import psycopg2

@@ -608,3 +608,53 @@ class TestObservationPublishGate:
         assert gate(parked) is None
         assert gate(optimize) is None
 
+
+class TestHeartbeatBurst:
+    """yb abort bursts silenced fresh-connection beats for ~30s and two
+    living workers were stamped presumed_dead (run 36261279551,
+    2026-09-26). The beat now retries its burst before conceding."""
+
+    def _worker(self):
+        worker = SystemtenderWorker.__new__(SystemtenderWorker)
+        worker.HEARTBEAT_INTERVAL_SECS = 10
+        return worker
+
+    def test_expired_or_abort_signature_is_retryable(self):
+        worker = self._worker()
+        assert worker._is_retryable_error(
+            Exception('current transaction is expired or aborted '
+                      '(query layer retry is not possible)'))
+
+    @patch('engine.systemtender_worker.time.sleep', lambda s: None)
+    def test_burst_survives_transient_abort_burst(self):
+        worker = self._worker()
+        beats = {'n': 0}
+
+        def flaky_beat():
+            beats['n'] += 1
+            if beats['n'] < 3:
+                raise Exception('current transaction is expired or aborted')
+        with patch.object(worker, '_beat_once', side_effect=flaky_beat):
+            worker._beat_with_burst()
+        assert beats['n'] == 3
+
+    @patch('engine.systemtender_worker.time.sleep', lambda s: None)
+    def test_burst_concedes_after_retries_without_raising(self):
+        worker = self._worker()
+        beats = {'n': 0}
+
+        def dead_beat():
+            beats['n'] += 1
+            raise Exception('current transaction is expired or aborted')
+        with patch.object(worker, '_beat_once', side_effect=dead_beat):
+            worker._beat_with_burst()  # no raise: the loop owns recovery
+        assert beats['n'] == 4  # first beat + 3 burst retries
+
+    @patch('engine.systemtender_worker.time.sleep', lambda s: None)
+    def test_burst_reraises_non_retryable(self):
+        worker = self._worker()
+        with patch.object(worker, '_beat_once',
+                          side_effect=ValueError('not a db thing')):
+            with pytest.raises(ValueError):
+                worker._beat_with_burst()
+
