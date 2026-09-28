@@ -54,6 +54,9 @@ States:
 
 Coordination: group-scoped fencing-token lease in shared DB.
 One sender at a time per group. Crash recovery via heartbeat staleness.
+No window opens before the room is still: every active peer has
+published standing params once (its first park landed) before any
+acquire succeeds.
 """
 
 import logging
@@ -359,6 +362,14 @@ class ProbeCoordinator:
 
         Ordering is purely turn-fair (the role ledger's acquire_count);
         no map-state quantity gates the acquire.
+
+        Stillness precondition: every active peer must have published
+        standing params at least once (params IS NOT NULL — its first
+        park landed). Benches boot at param_lower, so a registered but
+        unparked peer's physics sits at boot-zero; a window opened
+        before its first park banks that ambient as our effect (found
+        live: run 36393481120 banked a peer's boot ambient as a dip at
+        the midpoint level).
         """
         stale = self._stale_interval()
         window = str(self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
@@ -400,9 +411,16 @@ class ProbeCoordinator:
                 "SELECT acquire_count FROM interference_active_systemtenders "
                 "WHERE group_id = %s AND systemtender_id = %s"
                 "), 0)"
+                ") "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM interference_active_systemtenders u "
+                "WHERE u.group_id = %s AND u.systemtender_id <> %s "
+                "AND u.last_seen > NOW() - INTERVAL '" + window + " seconds' "
+                "AND u.params IS NULL"
                 ")",
                 (self.systemtender_id, phase,
                  self.group_id, self.group_id,
+                 self.group_id, self.systemtender_id,
                  self.group_id, self.systemtender_id,
                  self.group_id, self.systemtender_id)
             )
@@ -418,6 +436,14 @@ class ProbeCoordinator:
                 )
                 lease_row = cur.fetchone()
                 cur.execute(
+                    "SELECT systemtender_id FROM interference_active_systemtenders "
+                    "WHERE group_id = %s AND systemtender_id <> %s "
+                    "AND last_seen > NOW() - INTERVAL '" + window + " seconds' "
+                    "AND params IS NULL",
+                    (self.group_id, self.systemtender_id)
+                )
+                unparked = cur.fetchall()
+                cur.execute(
                     "SELECT systemtender_id, COALESCE(acquire_count, 0), "
                     "EXTRACT(EPOCH FROM (NOW() - last_seen)) "
                     "FROM interference_active_systemtenders "
@@ -427,10 +453,11 @@ class ProbeCoordinator:
                 )
                 logger.info(
                     "Lease acquire denied for %s (phase=%s): holder=%s "
-                    "heartbeat_age=%s walk_pending_peers=%s",
+                    "heartbeat_age=%s unparked_peers=%s walk_pending_peers=%s",
                     self.systemtender_id, phase,
                     lease_row[0] if lease_row else None,
                     lease_row[1] if lease_row else None,
+                    unparked,
                     cur.fetchall()
                 )
             if updated > 0:
