@@ -1332,3 +1332,108 @@ def test_char_complete_ignores_converged_params():
     # for the walk's own arithmetic.
     assert coord.char_complete() is True
     print("  PASS")
+
+
+# ─── Acquire stillness precondition ─────────────────────────────────
+
+class _StillnessCursor:
+    """Records executed SQL; the guarded acquire's rowcount is configurable."""
+
+    def __init__(self, acquire_rowcount):
+        self.acquire_rowcount = acquire_rowcount
+        self.sqls = []
+        self._last = ""
+
+    def execute(self, sql, params=None):
+        self._last = " ".join(sql.split())
+        self.sqls.append(self._last)
+
+    @property
+    def rowcount(self):
+        if "UPDATE sender_lease" in self._last and "SET holder" in self._last:
+            return self.acquire_rowcount
+        return 0
+
+    def fetchone(self):
+        if "SELECT token" in self._last:
+            return (7,)
+        if "EXTRACT(EPOCH FROM (NOW() - last_heartbeat))" in self._last:
+            return ("peer-holder", 1.0)
+        return None
+
+    def fetchall(self):
+        if "params IS NULL" in self._last:
+            return (("unparked-peer",),)
+        return []
+
+    def close(self):
+        pass
+
+
+class _StillnessConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+
+def _make_stillness_coord(acquire_rowcount):
+    cursor = _StillnessCursor(acquire_rowcount)
+    conn = _StillnessConn(cursor)
+    coord = ProbeCoordinator(
+        systemtender_id='test-sender-1',
+        config=_config(),
+        shared_db_fn=lambda op, desc: op(conn),
+        collect_upper_bounds_fn=lambda settings: _fake_upper_bounds(settings),
+    )
+    coord._initialized = True
+    return coord, cursor
+
+
+def test_acquire_sql_refuses_lease_while_peer_unparked():
+    """The guarded acquire must deny the lease while any active peer has
+    published no standing params — registered but unparked means its
+    bench still sits at boot-zero (param_lower), and a window opened
+    then banks that ambient as the sender's effect."""
+    coord, cursor = _make_stillness_coord(acquire_rowcount=1)
+    assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
+    acquire_sql = next(
+        s for s in cursor.sqls
+        if "UPDATE sender_lease" in s and "SET holder" in s
+    )
+    assert "params IS NULL" in acquire_sql, (
+        f"acquire SQL lost the stillness predicate: {acquire_sql}")
+    assert "u.systemtender_id <> %s" in acquire_sql, (
+        "stillness predicate must exclude the acquirer itself")
+    print("  PASS")
+
+
+def test_acquire_denial_names_unparked_peers():
+    """A silent denial is invisible — the log must name unparked peers."""
+    from unittest.mock import patch
+    import engine.probe_coordinator as pc
+    coord, cursor = _make_stillness_coord(acquire_rowcount=0)
+    with patch.object(pc, 'logger') as mock_logger:
+        assert coord._try_acquire_lease(coord.PROBE_PUSH) is False
+    logged = " ".join(str(c.args) for c in mock_logger.info.call_args_list
+                      if c.args)
+    assert "unparked_peers" in logged, f"denial log lost unparked_peers: {logged}"
+    assert "unparked-peer" in logged, f"denial log must name the peer: {logged}"
+    print("  PASS")
+
+
+def test_acquire_stillness_arms_before_turn_fairness():
+    """The stillness predicate gates the same UPDATE as turn fairness —
+    a peer unparked denies the lease even when turn order would allow."""
+    coord, cursor = _make_stillness_coord(acquire_rowcount=1)
+    coord._try_acquire_lease(coord.PROBE_PUSH)
+    acquire_sql = next(
+        s for s in cursor.sqls
+        if "UPDATE sender_lease" in s and "SET holder" in s
+    )
+    still_pos = acquire_sql.index("params IS NULL")
+    fairness_pos = acquire_sql.index("walk_pending IS TRUE")
+    assert fairness_pos < still_pos, (
+        "expected order: turn-fairness arm, then stillness arm")
+    print("  PASS")
