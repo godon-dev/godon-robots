@@ -176,6 +176,15 @@ class SystemtenderWorker:
         self._wish = None
         self._last_metric_noise = {}
 
+        # The first park BEFORE the room announcement: the bench boots at
+        # param_lower (the dials' extreme), and a registration that outran
+        # the first park let the room's first measurement window bank that
+        # extreme as whoever probed first (found live Sep 30: a phantom
+        # -0.34 dip in a fresh room's registry, attributed to node-2's
+        # first window while node-3's dial slept at boot-zero). Dials at
+        # neutral first, then "I'm ready".
+        self._park_before_announcement()
+
         self._register_interference_systemtender()
 
         # Legacy spectral watermark system REMOVED.
@@ -454,6 +463,30 @@ class SystemtenderWorker:
             self._with_shared_db(op, "register_interference_systemtender")
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
+
+    def _park_before_announcement(self) -> None:
+        """Apply the neutral park BEFORE the tender announces itself to
+        the room (registration). The bench boots at param_lower - the
+        dials' extreme - and a registration that outran the first park
+        let the room's first measurement window bank that extreme as
+        whoever probed first. Pure optimizers own their boot state:
+        no interference section, no park, no registration either."""
+        det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
+        if not det_cfg:
+            return
+        try:
+            neutral = self._compute_neutral_params()
+        except Exception as e:
+            logger.warning(f"BOOT PARK: neutral computation failed ({e}) - skipping; the room may see boot state")
+            return
+        if not neutral:
+            logger.warning("BOOT PARK: no neutral params - skipping")
+            return
+        try:
+            self._execute_trial(neutral)
+            logger.info(f"BOOT PARK: dials at neutral before announcement ({len(neutral)} dials)")
+        except Exception as e:
+            logger.warning(f"BOOT PARK: neutral apply failed ({e}) - skipping; the room may see boot state")
 
     def _publish_standing_params(self, params):
         """Refresh this systemtender's applied params in the heartbeat table.
