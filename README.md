@@ -15,13 +15,18 @@ The feeler protocol runs through all modes: touch gently (a bounded push), belie
 
 ## Architecture
 
-Trials are coordinated over an **Optuna database** (ask/tell storage, shared between robots). Effectuation and reconnaissance run as Windmill scripts on the target systems.
+Trials are coordinated over an **Optuna database** (ask/tell storage, shared between robots). Effectuation and reconnaissance run as Windmill scripts on the target systems. Walk policies read the causal notebook page for the system group to choose the next probe level.
 
 The system follows an **engine + strains** architecture: the engine (`engine/`) provides the generic trial loop — lifecycle, lease and turn-taking, algorithm diversity across parallel robots, guardrail checking, rollback, cooperative trial sharing, metrics — while strains (`strains/`) encapsulate domain-specific knowledge (parameter suggestion, validation).
 
 ### Engine (`engine/`)
 
 - **SystemtenderWorker** — the robot loop: lifecycle management, lease citizenship, guardrail checking, rollback support
+- **ProbeCoordinator** — the detection/characterization loop: decides what to probe next, and when a curve is done
+- **Characterization** — response curve interpolation and convergence detection
+- **WalkPolicy** — stateless walk policy over the causal notebook page: picks the next level from banked measurements
+- **CoverageWalk** — deterministic coverage walk over per-parameter level spaces
+- **Watermark** — impulse watermark generation for detection probes
 - **Communication** — cooperative trial sharing between robots via the shared Optuna store (probabilistic, best, worst, extremes strategies)
 - **SystemtenderMetricsClient** — Prometheus metrics via Push Gateway
 - **Strain loader** — dynamic loading and contract validation of strain modules
@@ -49,6 +54,10 @@ Scripts that gather metrics to evaluate trial outcomes. Same `(context, targets,
 - **Prometheus** — multi-sample collection, stabilization waits, and aggregation
 - **HTTP** — metric collection via HTTP GET with configurable stabilization, multi-sampling, and aggregation
 
+### Shared (`shared/`)
+
+Common modules used across engine, strains, and scripts — OTel logging and helpers.
+
 ## Available Strains
 
 ### linux_performance (`strains/linux_performance/`)
@@ -56,6 +65,12 @@ Optimizes Linux system parameters (sysctl, sysfs, cpufreq, ethtool) for improved
 
 ### bench_greenhouse (`strains/bench_greenhouse/`)
 Optimizes greenhouse climate simulation parameters. Supports multi-zone heating, ventilation, shading, CO2 injection, lighting, and irrigation. Designed for the `godon-bench-greenhouse` simulation container with HTTP-based effectuation and reconnaissance.
+
+### bench_generic (`strains/bench_generic/`)
+Domain knowledge for a configurable synthetic coupling bench: parameter registry and suggestion logic, used as validation ground truth.
+
+### bench_microgrid (`strains/bench_microgrid/`)
+Domain knowledge for microgrid simulation optimization: parameter registry, preflight validation, and suggestion logic for power grid management.
 
 ## License
 
