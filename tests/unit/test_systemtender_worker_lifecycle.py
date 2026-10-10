@@ -181,7 +181,7 @@ class TestShouldContinue:
             }
         })
         worker.study.trials = [MagicMock() for _ in range(50)]
-        worker.start_time = datetime.datetime(2020, 1, 1)
+        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
 
         assert worker._should_continue() is False
 
@@ -194,7 +194,7 @@ class TestShouldContinue:
             }
         })
         worker.study.trials = [MagicMock() for _ in range(5)]
-        worker.start_time = datetime.datetime.now()
+        worker.start_time = datetime.datetime.now(datetime.timezone.utc)
 
         assert worker._should_continue() is True
 
@@ -244,19 +244,19 @@ class TestShouldContinue:
 class TestCheckTimeBudget:
     def test_days_format(self):
         worker = _create_worker()
-        worker.start_time = datetime.datetime(2020, 1, 1)
+        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
         result = worker._check_time_budget({'timing': {'end': '1d'}})
         assert result is True
 
     def test_hours_format(self):
         worker = _create_worker()
-        worker.start_time = datetime.datetime.now() - datetime.timedelta(hours=2)
+        worker.start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
         result = worker._check_time_budget({'timing': {'end': '1h'}})
         assert result is True
 
     def test_minutes_format(self):
         worker = _create_worker()
-        worker.start_time = datetime.datetime.now()
+        worker.start_time = datetime.datetime.now(datetime.timezone.utc)
         result = worker._check_time_budget({'timing': {'end': '60m'}})
         assert result is False
 
@@ -267,7 +267,7 @@ class TestCheckTimeBudget:
 
     def test_invalid_format_returns_false(self):
         worker = _create_worker()
-        worker.start_time = datetime.datetime(2020, 1, 1)
+        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
         result = worker._check_time_budget({'timing': {'end': 'invalid'}})
         assert result is False
 
@@ -658,3 +658,43 @@ class TestHeartbeatBurst:
             with pytest.raises(ValueError):
                 worker._beat_with_burst()
 
+
+
+class TestTimeBudgetClock:
+    """Live receipt 10-10 (godon#402): the async-create executor reads
+    creation_ts from the registry row (TIMESTAMPTZ, offset-aware); the
+    worker subtracted a naive now() and all three reflight walkers
+    died at the time-budget check. The clock is normalized to aware-UTC
+    at the boundary; both stamp shapes must survive the budget check."""
+
+    def test_budget_check_with_aware_stamp(self):
+        worker = _create_worker(run={
+            'parallel': 1,
+            'completion_criteria': {
+                'iterations': {'min': 0, 'max': 1000},
+                'timing': {'end': '1d'},
+            }
+        })
+        # start_time from the fixture's Z-suffixed stamp - NOT overridden,
+        # unlike the legacy tests that forced naive datetimes back in
+        assert worker.start_time.tzinfo is not None
+        # must answer, not raise - either verdict is fine, the crash is the bug
+        result = worker._check_time_budget(
+            worker.config['run']['completion_criteria'])
+        assert isinstance(result, bool)
+
+    def test_budget_check_with_legacy_naive_stamp(self):
+        worker = _create_worker(
+            creation_ts='2025-01-15T10:30:00',
+            run={
+                'parallel': 1,
+                'completion_criteria': {
+                    'iterations': {'min': 0, 'max': 1000},
+                    'timing': {'end': '1d'},
+                }
+            },
+        )
+        assert worker.start_time.tzinfo is not None  # normalized at the boundary
+        result = worker._check_time_budget(
+            worker.config['run']['completion_criteria'])
+        assert isinstance(result, bool)

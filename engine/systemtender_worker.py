@@ -130,7 +130,16 @@ class SystemtenderWorker:
         creation_ts_str = config.get('creation_ts')
         if not creation_ts_str:
             raise ValueError("Required field 'creation_ts' missing from config")
-        self.start_time = dateutil.parser.parse(creation_ts_str)
+        # creation_ts arrives offset-aware since the async-create executor
+        # reads it from the registry row (postgres TIMESTAMPTZ); legacy
+        # stamps were naive. Normalize to aware-UTC once, at the boundary:
+        # every later clock comparison matches datetime.now(timezone.utc).
+        # Live receipt 10-10, godon#402: all three reflight walkers died
+        # in _check_time_budget - naive now() minus aware start_time.
+        _parsed_start = dateutil.parser.parse(creation_ts_str)
+        if _parsed_start.tzinfo is None:
+            _parsed_start = _parsed_start.replace(tzinfo=datetime.timezone.utc)
+        self.start_time = _parsed_start
 
         self.sampler_type = self._assign_sampler()
 
@@ -1407,7 +1416,9 @@ class SystemtenderWorker:
         unit_seconds = {'d': 86400, 'h': 3600, 'm': 60}
         budget_seconds = value * unit_seconds[unit]
 
-        elapsed_seconds = (datetime.datetime.now() - self.start_time).total_seconds()
+        elapsed_seconds = (
+            datetime.datetime.now(datetime.timezone.utc) - self.start_time
+        ).total_seconds()
 
         return elapsed_seconds >= budget_seconds
 
