@@ -134,8 +134,8 @@ class SystemtenderWorker:
         # reads it from the registry row (postgres TIMESTAMPTZ); legacy
         # stamps were naive. Normalize to aware-UTC once, at the boundary:
         # every later clock comparison matches datetime.now(timezone.utc).
-        # Live receipt 10-10, godon#402: all three reflight walkers died
-        # in _check_time_budget - naive now() minus aware start_time.
+        # (Receipt 10-10, godon#402: a naive now() once crashed every
+        # walker at a clock check.)
         _parsed_start = dateutil.parser.parse(creation_ts_str)
         if _parsed_start.tzinfo is None:
             _parsed_start = _parsed_start.replace(tzinfo=datetime.timezone.utc)
@@ -962,34 +962,10 @@ class SystemtenderWorker:
         logger.debug(f"Reset consecutive failures after successful trial")
 
     def _should_continue(self) -> bool:
-        completion_criteria = self.config.get('run', {}).get('completion_criteria', {})
-
-        min_iterations = completion_criteria.get('iterations', {}).get('min', 10)
-        max_iterations = completion_criteria.get('iterations', {}).get('max', 1000)
-
-        n_trials = len(self.study.trials)
-
-        if n_trials < min_iterations:
-            logger.debug(f"Continuing: {n_trials} < {min_iterations} min iterations")
-            return True
-        # The iteration cap gates OWN-WORK trials: optimizing and walking
-        # spend the budget. Holding through another systemtender's walk is
-        # cooperation and stays free (role ledger).
-        if self._own_trials >= max_iterations:
-            logger.info(
-                f"Stopping: {self._own_trials} own trials >= "
-                f"{max_iterations} max iterations")
-            return False
-
-        if self._check_time_budget(completion_criteria):
-            logger.info("Stopping: Time budget exceeded")
-            return False
-
-        if completion_criteria.get('quality_achieved', False):
-            if self._check_quality_thresholds():
-                logger.info("Stopping: All quality thresholds achieved")
-                return False
-
+        # A tender ends the way its role ends: the controller's stop flag,
+        # or the walk completing. No budget exits — trials and time are
+        # spend that belongs to the strategy doing the spending, not to
+        # tender config.
         if self._check_shutdown_requested():
             logger.info("Stopping: Shutdown requested by controller")
             return False
@@ -1393,66 +1369,6 @@ class SystemtenderWorker:
                     f"Wish assignment removal failed for "
                     f"{self._wish.get('wish_id')}: {e}")
         self._wish = None
-
-    def _check_time_budget(self, completion_criteria: dict) -> bool:
-        import re
-        timing_config = completion_criteria.get('timing', {})
-        end_time_str = timing_config.get('end')
-
-        if not end_time_str:
-            return False
-
-        if not hasattr(self, 'start_time'):
-            return False
-
-        match = re.match(r'(\d+)([dhm])', end_time_str)
-        if not match:
-            logger.warning(f"Invalid time format: {end_time_str}")
-            return False
-
-        value, unit = match.groups()
-        value = int(value)
-
-        unit_seconds = {'d': 86400, 'h': 3600, 'm': 60}
-        budget_seconds = value * unit_seconds[unit]
-
-        elapsed_seconds = (
-            datetime.datetime.now(datetime.timezone.utc) - self.start_time
-        ).total_seconds()
-
-        return elapsed_seconds >= budget_seconds
-
-    def _check_quality_thresholds(self) -> bool:
-        if not self.study.best_trials:
-            return False
-
-        objectives = self.config.get('objectives', [])
-        if not objectives:
-            return False
-
-        for objective in objectives:
-            if 'quality_threshold' not in objective:
-                return False
-
-        for trial in self.study.best_trials:
-            all_thresholds_met = True
-            for obj_value, objective in zip(trial.values, objectives):
-                threshold = objective.get('quality_threshold')
-                direction = objective.get('direction', 'minimize')
-
-                if direction == 'minimize':
-                    if obj_value > threshold:
-                        all_thresholds_met = False
-                        break
-                elif direction == 'maximize':
-                    if obj_value < threshold:
-                        all_thresholds_met = False
-                        break
-
-            if all_thresholds_met:
-                return True
-
-        return False
 
     def _update_state(self):
         import wmill
