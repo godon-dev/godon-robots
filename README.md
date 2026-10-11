@@ -8,7 +8,7 @@ One robot = one lease-holder on a live system. Its day is a cycle of bounded tri
 
 - **Optimize** — own-work trials: apply a parameter suggestion, measure the effect, keep or roll back. Guardrails are checked before and after every push; rollback restores the prior state.
 - **Walk** — characterization: sweep a parameter axis step by step to map the system's response curve. Walks feed the atlas — the connectome of the system.
-- **Hold** — stand still during another robot's walk. Holds are cooperation, not budget spend: interference detection needs quiet receivers.
+- **Hold** — stand still during another robot's walk. Holds are cooperation, never the holder's own work: interference detection needs quiet receivers.
 - **Pause** — rest at the neutral point between pushes; the target becomes a sensor, not an actuator.
 
 The feeler protocol runs through all modes: touch gently (a bounded push), believe what answers (the measured effect), yield the turn (fair-share lease — acquire is denied while a walking peer has had fewer turns).
