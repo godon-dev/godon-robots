@@ -150,183 +150,46 @@ class TestExecuteTrial:
 
 
 class TestShouldContinue:
-    def test_continues_below_min_iterations(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 10, 'max': 100},
-            }
-        })
-        worker.study.trials = [MagicMock() for _ in range(5)]
+    """The exit ladder after the budget cutover: the controller's stop
+    flag and the walk-complete lever. No iteration floors or caps, no
+    time budget, no quality exit — config absence means the role's
+    natural exit."""
+
+    def _worker(self, **overrides):
+        worker = _create_worker(**overrides)
+        worker._probe_coordinator = MagicMock()
+        return worker
+
+    def test_continues_with_no_budget_config(self):
+        worker = self._worker()
+        worker.study.trials = [MagicMock() for _ in range(500)]
+        worker._own_trials = 500
         assert worker._should_continue() is True
 
-    def test_stops_at_max_iterations(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 10, 'max': 100},
-            }
-        })
-        worker.study.trials = [MagicMock() for _ in range(100)]
-        # Role ledger: the cap gates OWN-WORK trials (optimize + walk).
-        worker._own_trials = 100
+    def test_stops_on_shutdown_requested(self):
+        worker = self._worker()
+        worker._check_shutdown_requested = lambda: True
         assert worker._should_continue() is False
 
-    def test_stops_when_time_budget_exceeded(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1000},
-                'timing': {'end': '1d'},
-            }
-        })
+    def test_stops_when_walk_complete(self):
+        worker = self._worker()
+        worker._probe_coordinator.char_complete = MagicMock(return_value=True)
+        assert worker._should_continue() is False
+
+    def test_continues_while_walk_open(self):
+        worker = self._worker()
+        worker._probe_coordinator.char_complete = MagicMock(return_value=False)
         worker.study.trials = [MagicMock() for _ in range(50)]
-        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
-
-        assert worker._should_continue() is False
-
-    def test_continues_when_time_budget_not_exceeded(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1000},
-                'timing': {'end': '30d'},
-            }
-        })
-        worker.study.trials = [MagicMock() for _ in range(5)]
-        worker.start_time = datetime.datetime.now(datetime.timezone.utc)
-
         assert worker._should_continue() is True
 
-    def test_stops_on_quality_threshold_achieved(self):
-        worker = _create_worker(
-            run={
-                'parallel': 1,
-                'completion_criteria': {
-                    'iterations': {'min': 0, 'max': 1000},
-                    'quality_achieved': True,
-                },
-            },
-            objectives=[
-                {'name': 'throughput', 'direction': 'minimize', 'quality_threshold': 10.0}
-            ],
-        )
-
-        best_trial = MagicMock()
-        best_trial.values = [5.0]
-        worker.study.trials = [MagicMock() for _ in range(20)]
-        worker.study.best_trials = [best_trial]
-
-        assert worker._should_continue() is False
-
-    def test_continues_when_quality_not_achieved(self):
-        worker = _create_worker(
-            run={
-                'parallel': 1,
-                'completion_criteria': {
-                    'iterations': {'min': 0, 'max': 1000},
-                    'quality_achieved': True,
-                },
-            },
-            objectives=[
-                {'name': 'throughput', 'direction': 'minimize', 'quality_threshold': 10.0}
-            ],
-        )
-
-        best_trial = MagicMock()
-        best_trial.values = [50.0]
-        worker.study.trials = [MagicMock() for _ in range(20)]
-        worker.study.best_trials = [best_trial]
-
+    def test_stub_char_complete_does_not_stop(self):
+        # Defensive form: a stub coordinator answering a non-bool must
+        # not read as complete.
+        worker = self._worker()
+        worker._probe_coordinator.char_complete = MagicMock(
+            return_value='maybe')
         assert worker._should_continue() is True
 
-
-class TestCheckTimeBudget:
-    def test_days_format(self):
-        worker = _create_worker()
-        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
-        result = worker._check_time_budget({'timing': {'end': '1d'}})
-        assert result is True
-
-    def test_hours_format(self):
-        worker = _create_worker()
-        worker.start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
-        result = worker._check_time_budget({'timing': {'end': '1h'}})
-        assert result is True
-
-    def test_minutes_format(self):
-        worker = _create_worker()
-        worker.start_time = datetime.datetime.now(datetime.timezone.utc)
-        result = worker._check_time_budget({'timing': {'end': '60m'}})
-        assert result is False
-
-    def test_no_end_time_returns_false(self):
-        worker = _create_worker()
-        result = worker._check_time_budget({})
-        assert result is False
-
-    def test_invalid_format_returns_false(self):
-        worker = _create_worker()
-        worker.start_time = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
-        result = worker._check_time_budget({'timing': {'end': 'invalid'}})
-        assert result is False
-
-
-class TestCheckQualityThresholds:
-    def test_threshold_met_minimize(self):
-        worker = _create_worker(objectives=[
-            {'name': 'throughput', 'direction': 'minimize', 'quality_threshold': 10.0}
-        ])
-
-        best_trial = MagicMock()
-        best_trial.values = [5.0]
-        worker.study.best_trials = [best_trial]
-
-        assert worker._check_quality_thresholds() is True
-
-    def test_threshold_not_met_minimize(self):
-        worker = _create_worker(objectives=[
-            {'name': 'throughput', 'direction': 'minimize', 'quality_threshold': 10.0}
-        ])
-
-        best_trial = MagicMock()
-        best_trial.values = [15.0]
-        worker.study.best_trials = [best_trial]
-
-        assert worker._check_quality_thresholds() is False
-
-    def test_threshold_met_maximize(self):
-        worker = _create_worker(objectives=[
-            {'name': 'throughput', 'direction': 'maximize', 'quality_threshold': 100.0}
-        ])
-
-        best_trial = MagicMock()
-        best_trial.values = [150.0]
-        worker.study.best_trials = [best_trial]
-
-        assert worker._check_quality_thresholds() is True
-
-    def test_no_best_trials_returns_false(self):
-        worker = _create_worker(objectives=[
-            {'name': 'throughput', 'direction': 'minimize', 'quality_threshold': 10.0}
-        ])
-        worker.study.best_trials = []
-
-        assert worker._check_quality_thresholds() is False
-
-    def test_no_objectives_returns_false(self):
-        worker = _create_worker(objectives=[])
-        assert worker._check_quality_thresholds() is False
-
-    def test_no_quality_threshold_in_objectives_returns_false(self):
-        worker = _create_worker(objectives=[
-            {'name': 'throughput', 'direction': 'minimize'}
-        ])
-        best_trial = MagicMock()
-        best_trial.values = [5.0]
-        worker.study.best_trials = [best_trial]
-
-        assert worker._check_quality_thresholds() is False
 
 
 class TestWorkerInit:
@@ -365,12 +228,7 @@ class TestWorkerInit:
 
 class TestRunLoop:
     def _run_loop_worker(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1},
-            }
-        })
+        worker = _create_worker(run={'parallel': 1})
         trial_counter = [0]
 
         def fake_ask():
@@ -389,11 +247,14 @@ class TestRunLoop:
         worker.study.tell = fake_tell
         worker.study.trials = real_trials
 
-        # The iteration cap gates WALK trials (role ledger): the fake
-        # coordinator must report walking mode, or the loop never stops.
+        # The walk ends the run: the fake coordinator reports walking
+        # mode, and char_complete flips True at the second boundary —
+        # or the loop never stops.
         worker._probe_coordinator.decide_trial = MagicMock(
             return_value={'mode': 'impulse',
                           'params': {'vm.swappiness': 10}})
+        worker._probe_coordinator.char_complete = MagicMock(
+            side_effect=[False, True])
         best_mock = MagicMock()
         best_mock.number = -1
         worker.study.best_trials = [best_mock]
@@ -444,12 +305,8 @@ class TestRunLoop:
         assert len(worker.study.trials) == 1
 
     def test_run_pushes_metrics_on_completion(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 0},
-            }
-        })
+        worker = _create_worker(run={'parallel': 1})
+        worker._probe_coordinator.char_complete = MagicMock(return_value=True)
 
         with patch.object(worker, 'metrics') as mock_metrics:
             worker.run()
@@ -660,41 +517,4 @@ class TestHeartbeatBurst:
 
 
 
-class TestTimeBudgetClock:
-    """Live receipt 10-10 (godon#402): the async-create executor reads
-    creation_ts from the registry row (TIMESTAMPTZ, offset-aware); the
-    worker subtracted a naive now() and all three reflight walkers
-    died at the time-budget check. The clock is normalized to aware-UTC
-    at the boundary; both stamp shapes must survive the budget check."""
 
-    def test_budget_check_with_aware_stamp(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1000},
-                'timing': {'end': '1d'},
-            }
-        })
-        # start_time from the fixture's Z-suffixed stamp - NOT overridden,
-        # unlike the legacy tests that forced naive datetimes back in
-        assert worker.start_time.tzinfo is not None
-        # must answer, not raise - either verdict is fine, the crash is the bug
-        result = worker._check_time_budget(
-            worker.config['run']['completion_criteria'])
-        assert isinstance(result, bool)
-
-    def test_budget_check_with_legacy_naive_stamp(self):
-        worker = _create_worker(
-            creation_ts='2025-01-15T10:30:00',
-            run={
-                'parallel': 1,
-                'completion_criteria': {
-                    'iterations': {'min': 0, 'max': 1000},
-                    'timing': {'end': '1d'},
-                }
-            },
-        )
-        assert worker.start_time.tzinfo is not None  # normalized at the boundary
-        result = worker._check_time_budget(
-            worker.config['run']['completion_criteria'])
-        assert isinstance(result, bool)

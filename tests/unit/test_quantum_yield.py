@@ -3,8 +3,7 @@
 Seed-50 replay: one systemtender held the lease for its entire walk while
 three followers held to cap, never walking. These tests pin the cure:
 a full slice with a pending peer yields the lease (at a completed
-probe-cycle boundary only), and hold trials stop consuming the
-iteration budget. Ordering is turn-fair (the role ledger's
+probe-cycle boundary only). Ordering is turn-fair (the role ledger's
 acquire_count); no map-state quantity gates the acquire.
 """
 
@@ -112,46 +111,6 @@ class TestQuantumYield:
         assert not released
 
 
-class TestRoleLedger:
-    def test_walk_trials_gate_the_iteration_cap(self):
-        import sys
-        from unittest.mock import MagicMock
 
-        stubs = {name: MagicMock() for name in [
-            'f', 'f.systemtender', 'f.systemtender.engine',
-            'f.systemtender.engine.probe_coordinator',
-            'f.systemtender.engine.systemtender_metrics_client',
-            'f.systemtender.engine.communication',
-            'f.systemtender.engine.coverage_walk',
-            'f.systemtender.engine.walk_policy',
-            'f.systemtender.strains', 'f.systemtender.strains.bench_generic',
-            'f.systemtender.strains.bench_generic.strain',
-            'wmill']}
-        saved = {k: sys.modules.get(k) for k in stubs}
-        sys.modules.update(stubs)
-        try:
-            from engine.systemtender_worker import SystemtenderWorker
-            import types
-            w = SystemtenderWorker.__new__(SystemtenderWorker)  # skip heavy init
-            w.config = {'run': {'completion_criteria': {
-                'iterations': {'min': 10, 'max': 120}}},
-                'interference_detection': {}}
-            w.study = types.SimpleNamespace(trials=list(range(500)))
-            w._own_trials = 0
-            w._check_time_budget = lambda cc: False
-            w._check_shutdown_requested = lambda: False
-
-            assert w._should_continue() is True, \
-                "holding 500 trials must not stop a systemtender that never worked"
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    sys.modules.pop(k, None)
-                else:
-                    sys.modules[k] = v
-
-        w._own_trials = 130  # cap 120 exceeded by actual walking
-        assert w._should_continue() is False, \
-            "130 own-work trials over a 120 cap stops the systemtender"
 
 
