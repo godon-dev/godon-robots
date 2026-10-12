@@ -35,6 +35,15 @@ from f.systemtender.engine.trial_ledger import TrialLedger, TrialRef, classify
 from f.systemtender.engine.systemtender_metrics_client import SystemtenderMetricsClient
 from f.systemtender.engine.strain_loader import load_strain
 
+try:
+    from f.systemtender.engine.seek_wish import SeekRefused, parse_seek_plan
+    from f.systemtender.engine.seek_driver import SeekDriver
+    from f.systemtender.engine.seek_policy import region_policy
+except ImportError:  # test envs import from the plain package
+    from engine.seek_wish import SeekRefused, parse_seek_plan
+    from engine.seek_driver import SeekDriver
+    from engine.seek_policy import region_policy
+
 from f.systemtender.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
@@ -165,6 +174,9 @@ class SystemtenderWorker:
         # Wish serving (steer mode): adopted at the pulse, held at the
         # planned value, released to neutral. None = no wish bound.
         self._wish = None
+        # The seek wish's driver (one step per trial while a seek
+        # holds this tender); None whenever no seek is bound.
+        self._seek_driver = None
         self._last_metric_noise = {}
 
         # The first park BEFORE the room announcement: the bench boots at
@@ -916,6 +928,12 @@ class SystemtenderWorker:
         plan = self._fetch_wish_plan(wish_id)
         if not plan:
             return
+        if plan.get('species') == 'seek':
+            # The seek wish: a commissioned walk, not a hold. Its shape
+            # is parsed at the door — a refused plan never binds and
+            # never half-runs.
+            self._adopt_seek_wish(wish_id, plan)
+            return
         moves = (plan.get('plan') or {}).get('moves') or [{}]
         move = moves[0] if moves else {}
         param, setting = move.get('param'), move.get('setting')
@@ -959,6 +977,94 @@ class SystemtenderWorker:
         # stillness is part of this wish's delivery.
         if len(path) >= 2:
             self._notify_wish_receiver(wish_id, path[-1])
+
+    def _adopt_seek_wish(self, wish_id: str, plan: Dict[str, Any]) -> None:
+        """Bind a seek wish. The shape parses at the door: a refused
+        plan (impossible budget, undeclared compass, empty region)
+        logs its reason and never binds — a wish must never half-run.
+        """
+        body = plan.get('seek') or plan.get('plan') or {}
+        try:
+            seek_plan = parse_seek_plan({
+                'wish_id': wish_id,
+                'species': body.get('species') or 'find_best',
+                'region': body.get('region') or {},
+                'criterion': body.get('criterion'),
+                'budget': body.get('budget'),
+                'candidates': body.get('candidates'),
+            })
+        except SeekRefused as refused:
+            logger.warning(
+                f"Wish {wish_id} refused at the door: {refused.reason}"
+                f"{' (' + refused.detail + ')' if refused.detail else ''}"
+                " — never bound, never half-run")
+            return
+        self._wish = {
+            'wish_id': wish_id,
+            'instruction': 'seek',
+            'param': None,
+            'setting': None,
+            'role': 'sender',
+        }
+        self._seek_driver = SeekDriver(seek_plan, region_policy(seek_plan.region))
+        logger.info(
+            f"Wish {wish_id} adopted as SEEK: species={seek_plan.species}, "
+            f"dials={sorted(seek_plan.region)}, budget={seek_plan.budget}, "
+            f"candidates={seek_plan.candidates}")
+
+    def _seek_decision(self) -> Dict[str, Any]:
+        """One driver step per trial — the seek's whole loop rides the
+        ordinary trial rails. A completed seek writes its return, parks
+        at neutral, and releases the wish: undeclared states revert;
+        holding the winner is a declared steerwish through freshly
+        walked ground, never automatic."""
+        driver = self._seek_driver
+        if driver is None:
+            # An unbound seek (refused at the door): stillness, not search.
+            return {'mode': 'hold', 'params': self._compute_neutral_params() or {}}
+        step = driver.step()
+        if step is None:
+            self._finish_seek()
+            return {'mode': 'hold', 'params': self._compute_neutral_params() or {}}
+        decision = {'mode': 'push', 'params': step['params'],
+                    'seek_phase': step['phase']}
+        if step.get('dart'):
+            decision['seek_dart'] = True
+        else:
+            decision['probe_param'] = step.get('probe_dial')
+            decision['probe_level'] = step.get('probe_level')
+        return decision
+
+    def _finish_seek(self) -> None:
+        """Write the RETURN into the tender's own ledger (its DB, its
+        pulse) and release. The spend is already durable — every dart
+        and every pass was a trial row; the return is the receipt over
+        them. Causal's book closes the wish from this row (its side of
+        the rung)."""
+        driver = self._seek_driver
+        if driver is None:
+            return
+        wish_id = self._wish['wish_id'] if self._wish else 'unknown'
+        try:
+            result = driver.result()
+        except RuntimeError as e:
+            logger.warning(f"Seek {wish_id}: no result to write ({e})")
+            self._seek_driver = None
+            self._release_wish(delete_assignment=True)
+            return
+        payload = json.dumps(result, sort_keys=True)
+        try:
+            self._retry_op(
+                lambda: self.ledger.state_put(f'seek_return::{wish_id}', payload),
+                f"ledger.state_put seek_return ({wish_id})")
+        except Exception as e:
+            logger.error(f"Seek return write failed for {wish_id}: {e}")
+        logger.info(
+            f"Wish {wish_id} RETURNED: stop={result.get('stop_reason')}, "
+            f"spend={result.get('spend_count')}, "
+            f"finding={result.get('finding')}")
+        self._seek_driver = None
+        self._release_wish(delete_assignment=True)
 
     def _notify_wish_receiver(self, wish_id: str, receiver: str) -> None:
         import psycopg2
@@ -1028,6 +1134,19 @@ class SystemtenderWorker:
             # goes silent mid-wish (found live, Sep 21).
             instruction = plan.get('instruction', 'hold')
             self._wish['instruction'] = 'release' if instruction == 'release' else 'park'
+        elif self._wish.get('instruction') == 'seek':
+            # The seek owns its loop until the book releases it: a
+            # page that speaks another instruction must not silently
+            # flip a commissioned walk into a hold. A release aborts
+            # honestly — the seek comes home RETURNED with what it
+            # holds, the spend never lost.
+            if plan.get('instruction') == 'release':
+                if self._seek_driver is not None:
+                    self._seek_driver.abort()
+                    self._finish_seek()
+                else:
+                    self._release_wish(delete_assignment=True)
+            return
         else:
             self._wish['instruction'] = plan.get('instruction', 'hold')
         if self._wish['instruction'] == 'release':
@@ -1133,7 +1252,14 @@ class SystemtenderWorker:
 
                     # === Detection Coordinator ===
                     decision = self._probe_coordinator.decide_trial(trial)
-                    if (self._wish and self._wish.get('instruction') == 'hold'
+                    if (self._wish and self._wish.get('instruction') == 'seek'):
+                        # The seek outranks the walk for this tender's
+                        # trials: the driver names this trial's settings
+                        # (a dart, or a pass level over the stepped
+                        # baseline); the wallet and the dials stay the
+                        # driver's, the rails stay the loop's.
+                        decision = self._seek_decision()
+                    elif (self._wish and self._wish.get('instruction') == 'hold'
                             and self._wish.get('param') is not None):
                         # The wish outranks the walk: hold the planned value.
                         # Base = the coordinator's hold params (or neutral),
@@ -1160,10 +1286,13 @@ class SystemtenderWorker:
 
                     # The classification, written once — readers bucket
                     # by kind, never by string-matching attr literals.
+                    # A dart carries its own kind: a joint random setting
+                    # is a prior, never curve ground.
                     self.ledger.set_kind(trial.number, classify(
                         detection_mode,
                         decision.get('impulse_phase'),
-                        self._probe_coordinator.get_state()))
+                        self._probe_coordinator.get_state(),
+                        dart=bool(decision.get('seek_dart'))))
                     # The why, as evidence: everything the coordinator
                     # returned for this trial (params ride separately).
                     trial.set_user_attr('decision', json.dumps(
@@ -1271,6 +1400,30 @@ class SystemtenderWorker:
                         trial.set_user_attr('effectuation_params', json.dumps(params))
                         self._publish_standing_params(params)
 
+                        # The seek's observe: hand this trial's criterion
+                        # reading (and its noise, when the window offered
+                        # one) to the driver — one dart ranked, or one pass
+                        # level measured. cover_now observes a 0.0 reading:
+                        # no compass declared, the walk itself is the point.
+                        if self._seek_driver is not None and self._wish \
+                                and self._wish.get('instruction') == 'seek':
+                            outcome = self._seek_driver.criterion_outcome
+                            if outcome is None:
+                                self._seek_driver.observe(0.0, 0.0)
+                            else:
+                                local = outcome.rsplit('/', 1)[-1]
+                                reading = metrics.get(local)
+                                if reading is None:
+                                    logger.warning(
+                                        f"Seek trial {trial.number}: criterion "
+                                        f"{local!r} absent from metrics "
+                                        f"{sorted(metrics)[:6]}")
+                                    self._seek_driver.observe(0.0, 0.0)
+                                else:
+                                    noise = (self._last_metric_noise or {}).get(local, 0.0)
+                                    self._seek_driver.observe(
+                                        float(reading), float(noise or 0.0))
+
                         # Publish this trial's own readings to the shared
                         # table whenever a protocol phase was in flight:
                         # receivers holding (lease_phase = the phase they
@@ -1365,6 +1518,12 @@ class SystemtenderWorker:
             self._update_state()
             raise
         finally:
+            # A stop or a crash mid-seek still comes home: the driver
+            # aborts between trials (never mid-measurement) and the
+            # return is written — the spend is never silently lost.
+            if self._seek_driver is not None:
+                self._seek_driver.abort()
+                self._finish_seek()
             self._stamp_finished()
             self.metrics.push()
 

@@ -69,11 +69,16 @@ _MIGRATIONS = {
 }
 
 
-def classify(mode, impulse_phase, coord_state):
+def classify(mode, impulse_phase, coord_state, dart=False):
     """The one classification — pinned against the rust reader's
     from_trials. push/pause/hold_calib come from the impulse phase
     (probe_-prefix normalized away: a rename must never re-starve a
-    reader), receiver hold from detection mode + coordinator state."""
+    reader), receiver hold from detection mode + coordinator state.
+    A seek dart is its OWN kind: a joint random setting is
+    unattributable, so no reader may ever bank one as curve ground —
+    darts are priors, never map entries."""
+    if dart:
+        return 'seek_prior'
     phase = impulse_phase or ''
     if phase.startswith('probe_'):
         phase = phase[len('probe_'):]
