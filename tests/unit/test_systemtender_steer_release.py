@@ -21,12 +21,9 @@ def _bare_worker():
     return w
 
 
-def _fake_engine():
-    """Context-managed engine whose DELETE we can assert on."""
-    conn = MagicMock()
-    engine = MagicMock()
-    engine.connect.return_value.__enter__.return_value = conn
-    return engine, conn
+def _fake_ledger():
+    """A ledger mock whose removals we can assert on."""
+    return MagicMock()
 
 
 def test_release_instruction_reverts_and_deletes_row():
@@ -34,12 +31,7 @@ def test_release_instruction_reverts_and_deletes_row():
     w = _bare_worker()
     w._wish = {'wish_id': 'w-1', 'param': 'valve', 'setting': 0.62,
                'instruction': 'hold'}
-    engine, conn = _fake_engine()
-    w.study = MagicMock()
-    # The unwrap path: _CachedStorage wraps RDBStorage — the engine
-    # lives on the backend (a bare storage would expose it directly).
-    w.study._storage._backend.engine = engine
-    w.study._storage.engine = engine
+    w.ledger = _fake_ledger()
 
     plan = {'status': 'released', 'instruction': 'release', 'plan': None}
     with patch.object(w, '_fetch_wish_plan', return_value=plan), \
@@ -51,9 +43,7 @@ def test_release_instruction_reverts_and_deletes_row():
     assert exec_trial.call_count == 1, "the dial reverts to neutral once"
     reverted = exec_trial.call_args[0][0]
     assert reverted == {'valve': 0.5}
-    deleted = conn.execute.call_args[0][0]
-    assert 'DELETE FROM wish_assignments' in str(deleted)
-    assert conn.execute.call_args[0][1] == {'wid': 'w-1'}
+    w.ledger.wish_remove.assert_called_once_with('w-1')
 
     print("  instruction release -> neutral + row deleted + wish dropped")
     print("  PASS")
@@ -75,14 +65,12 @@ def test_hold_still_holds_and_release_by_row_stays():
     assert w._wish['instruction'] == 'hold'
 
     # row removal (the owner's close) still releases the plain way
-    engine, conn = _fake_engine()
-    w.study = MagicMock()
-    w.study._storage.engine = engine
+    w.ledger = _fake_ledger()
     with patch.object(w, '_compute_neutral_params', return_value={'valve': 0.5}), \
             patch.object(w, '_execute_trial'):
         w._release_wish()  # delete_assignment defaults False
     assert w._wish is None
-    conn.execute.assert_not_called()
+    w.ledger.wish_remove.assert_not_called()
 
     print("  hold re-plans in place; row removal releases without DELETE")
     print("  PASS")

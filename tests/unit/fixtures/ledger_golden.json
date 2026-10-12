@@ -1,0 +1,28 @@
+{
+ "ledger_state": [
+  {
+   "key": "rollback_state_target_0",
+   "value_json": "{\"state\": \"normal\", \"version\": 1}"
+  }
+ ],
+ "trials": [
+  {
+   "attrs": "{\"coord_state\": \"probe_push\", \"detection_mode\": \"impulse\", \"effectuation_params\": \"{\\\"param_0\\\": 75.0}\", \"impulse_phase\": \"probe_push\", \"impulse_scale\": 1.5, \"observations\": \"[0.51, 0.49]\", \"probe_level\": 75.0, \"probe_param\": \"param_0\"}",
+   "error": null,
+   "kind": "push",
+   "number": 1,
+   "params": "{}",
+   "state": "COMPLETE",
+   "value": 0.512
+  },
+  {
+   "attrs": "{}",
+   "error": "park without neutral params",
+   "kind": "hold",
+   "number": 2,
+   "params": "{}",
+   "state": "FAIL",
+   "value": null
+  }
+ ]
+}

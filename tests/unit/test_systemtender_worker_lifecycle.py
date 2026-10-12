@@ -26,9 +26,6 @@ import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 sys.modules['wmill'] = MagicMock()
-sys.modules['optuna'] = MagicMock()
-sys.modules['optuna.storages'] = MagicMock()
-sys.modules['optuna.trial'] = MagicMock()
 
 # Mock Windmill package namespace so systemtender_worker's internal imports resolve
 sys.modules['f'] = MagicMock()
@@ -64,25 +61,21 @@ def _base_config(**overrides):
     return config
 
 
-def _mock_study(trials=None, best_trials=None):
-    study = MagicMock()
-    study.trials = trials or []
-    study.best_trials = best_trials or []
-    study.study_name = 'test_study'
-    study.user_attrs = {}
-
-    def set_attr(key, value):
-        study.user_attrs[key] = value
-
-    study.set_user_attr = set_attr
-    return study
+def _mock_ledger(trials=None, best=None):
+    ledger = MagicMock()
+    ledger.trials.return_value = trials or []
+    ledger.count.return_value = len(trials or [])
+    ledger.best_trial.return_value = best
+    ledger.state_get.return_value = None
+    return ledger
 
 
 def _create_worker(**config_overrides):
     config = _base_config(**config_overrides)
-    study = _mock_study()
+    ledger = _mock_ledger()
 
-    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
+    with patch.object(SystemtenderWorker, '_init_ledger',
+                      lambda self: setattr(self, 'ledger', ledger)), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
         worker = SystemtenderWorker(config)
@@ -155,7 +148,7 @@ class TestShouldContinue:
 
     def test_continues_with_no_budget_config(self):
         worker = self._worker()
-        worker.study.trials = [MagicMock() for _ in range(500)]
+        worker.ledger.trials.return_value = [MagicMock() for _ in range(500)]
         assert worker._should_continue() is True
 
     def test_stops_on_shutdown_requested(self):
@@ -171,7 +164,7 @@ class TestShouldContinue:
     def test_continues_while_walk_open(self):
         worker = self._worker()
         worker._probe_coordinator.char_complete = MagicMock(return_value=False)
-        worker.study.trials = [MagicMock() for _ in range(50)]
+        worker.ledger.trials.return_value = [MagicMock() for _ in range(50)]
         assert worker._should_continue() is True
 
     def test_stub_char_complete_does_not_stop(self):
@@ -190,7 +183,7 @@ class TestWorkerInit:
         del config['creation_ts']
 
         with pytest.raises(ValueError, match="creation_ts"):
-            with patch.object(SystemtenderWorker, '_load_or_create_study'), \
+            with patch.object(SystemtenderWorker, '_init_ledger'), \
                  patch.object(SystemtenderWorker, '_update_state'), \
                  patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
                 SystemtenderWorker(config)
@@ -221,22 +214,20 @@ class TestRunLoop:
     def _run_loop_worker(self):
         worker = _create_worker(run={'parallel': 1})
         trial_counter = [0]
-
-        def fake_ask():
-            t = MagicMock()
-            t.number = trial_counter[0]
-            trial_counter[0] += 1
-            return t
-
-        worker.study.ask = fake_ask
+        worker.ledger.begin.side_effect = lambda: trial_counter[0] or trial_counter.__setitem__(0, trial_counter[0] + 1) or (trial_counter[0] - 1)
 
         real_trials = []
 
-        def fake_tell(trial, *args, **kwargs):
-            real_trials.append(trial)
+        def fake_complete(number, value):
+            real_trials.append(number)
 
-        worker.study.tell = fake_tell
-        worker.study.trials = real_trials
+        def fake_fail(number, error=None):
+            real_trials.append(number)
+
+        worker.ledger.complete.side_effect = fake_complete
+        worker.ledger.fail.side_effect = fake_fail
+        worker.ledger.trials.return_value = real_trials
+        worker._real_trials = real_trials
 
         # The walk ends the run: the fake coordinator reports walking
         # mode, and char_complete flips True at the second boundary —
@@ -246,34 +237,27 @@ class TestRunLoop:
                           'params': {'vm.swappiness': 10}})
         worker._probe_coordinator.char_complete = MagicMock(
             side_effect=[False, True])
-        best_mock = MagicMock()
-        best_mock.number = -1
-        worker.study.best_trials = [best_mock]
+        worker.ledger.best_trial.return_value = {'number': -1, 'params': {},
+                                                  'value': None, 'values': []}
 
         return worker
 
     def test_run_executes_single_trial(self):
         worker = self._run_loop_worker()
 
-        mock_strain = MagicMock()
-        mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
-        worker.strain = mock_strain
+        worker.strain = MagicMock()
 
         with patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
              patch.object(worker, 'metrics'):
             worker.run()
 
-        assert len(real_trials := worker.study.trials) == 1
+        assert len(worker.ledger.trials.return_value) == 1
 
     def test_run_marks_trial_failed_on_guardrail_violation(self):
         worker = self._run_loop_worker()
 
-        mock_strain = MagicMock()
-        mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
-        worker.strain = mock_strain
-
-        from optuna.trial import TrialState
+        worker.strain = MagicMock()
 
         with patch.object(worker, '_execute_trial', return_value={'cpu_usage': 99.0}), \
              patch.object(worker, '_check_guardrails', return_value=(True, ['cpu_usage violated'])), \
@@ -281,19 +265,18 @@ class TestRunLoop:
              patch.object(worker, 'metrics'):
             worker.run()
 
-        assert len(worker.study.trials) == 1
+        assert len(worker._real_trials) == 1
 
     def test_run_handles_trial_exception(self):
         worker = self._run_loop_worker()
 
-        mock_strain = MagicMock()
-        mock_strain.suggest_params.side_effect = RuntimeError("param error")
-        worker.strain = mock_strain
+        worker.strain = MagicMock()
+        worker.strain = MagicMock()
 
         with patch.object(worker, 'metrics'):
             worker.run()
 
-        assert len(worker.study.trials) == 1
+        assert len(worker._real_trials) == 1
 
     def test_run_pushes_metrics_on_completion(self):
         worker = _create_worker(run={'parallel': 1})

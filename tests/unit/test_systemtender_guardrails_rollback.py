@@ -51,23 +51,28 @@ def _base_config(**overrides):
 
 def _create_worker(**config_overrides):
     config = _base_config(**config_overrides)
-    with patch.object(SystemtenderWorker, '_load_or_create_study') as mock_study, \
+    with patch.object(SystemtenderWorker, '_init_ledger',
+                      lambda self: setattr(self, 'ledger', MagicMock())), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
-        mock_study.return_value = MagicMock()
         return SystemtenderWorker(config)
 
 
-def _mock_study_with_attrs():
-    study = MagicMock()
-    study.user_attrs = {}
+def _mock_ledger_with_state():
+    ledger = MagicMock()
+    ledger._state = {}
 
-    def set_attr(key, value):
-        study.user_attrs[key] = value
+    def state_get(key):
+        return ledger._state.get(key)
 
-    study.set_user_attr = set_attr
-    study.study_name = 'test_study'
-    return study
+    def state_put(key, value):
+        ledger._state[key] = value
+
+    ledger.state_get.side_effect = state_get
+    ledger.state_put.side_effect = state_put
+    ledger.best_trial.return_value = None
+    ledger.trials.return_value = []
+    return ledger
 
 
 class TestCheckGuardrails:
@@ -163,12 +168,12 @@ class TestRollbackStateManagement:
                 },
             },
         )
-        study = _mock_study_with_attrs()
+        ledger = _mock_ledger_with_state()
 
         with patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
             worker = SystemtenderWorker.__new__(SystemtenderWorker)
             worker.config = config
-            worker.study = study
+            worker.ledger = ledger
             worker.systemtender_id = 'test-systemtender-id'
             worker.systemtender_uuid = 'test-uuid'
             worker.worker_id = 'test_worker_test-uuid'
@@ -185,7 +190,7 @@ class TestRollbackStateManagement:
         worker = self._create_worker_with_rollback()
         worker._init_rollback_state()
 
-        state = json.loads(worker.study.user_attrs['rollback_state_target_0'])
+        state = json.loads(worker.ledger._state['rollback_state_target_0'])
         assert state['state'] == 'normal'
         assert state['consecutive_failures'] == 0
         assert state['last_successful_params'] is None
@@ -196,7 +201,7 @@ class TestRollbackStateManagement:
         worker._init_rollback_state()
         worker._init_rollback_state()
 
-        state = json.loads(worker.study.user_attrs['rollback_state_target_0'])
+        state = json.loads(worker.ledger._state['rollback_state_target_0'])
         assert state['version'] == 0
 
     def test_get_rollback_state_returns_initialized(self):
@@ -209,7 +214,7 @@ class TestRollbackStateManagement:
         worker = self._create_worker_with_rollback()
         state = worker._get_rollback_state()
         assert state['state'] == 'normal'
-        assert 'rollback_state_target_0' in worker.study.user_attrs
+        assert 'rollback_state_target_0' in worker.ledger._state
 
     def test_update_rollback_state_increments_version(self):
         worker = self._create_worker_with_rollback()
@@ -219,7 +224,7 @@ class TestRollbackStateManagement:
         new_state['consecutive_failures'] = 1
         worker._update_rollback_state(new_state)
 
-        stored = json.loads(worker.study.user_attrs['rollback_state_target_0'])
+        stored = json.loads(worker.ledger._state['rollback_state_target_0'])
         assert stored['version'] == 1
         assert stored['consecutive_failures'] == 1
 
@@ -274,7 +279,7 @@ class TestRollbackStateManagement:
         worker = self._create_worker_with_rollback()
         worker.rollback_enabled = False
         worker._handle_guardrail_violation({'param': 'value'})
-        assert 'rollback_state_target_0' not in worker.study.user_attrs
+        assert 'rollback_state_target_0' not in worker.ledger._state
 
     def test_handle_successful_trial_resets_failures(self):
         worker = self._create_worker_with_rollback()
@@ -295,7 +300,7 @@ class TestRollbackStateManagement:
         worker = self._create_worker_with_rollback()
         worker.rollback_enabled = False
         worker._handle_successful_trial({'param': 'value'})
-        assert 'rollback_state_target_0' not in worker.study.user_attrs
+        assert 'rollback_state_target_0' not in worker.ledger._state
 
 
 class TestExecuteRollback:
@@ -328,13 +333,13 @@ class TestExecuteRollback:
                 },
             },
         )
-        study = _mock_study_with_attrs()
-        study.best_trials = best_trials or []
+        ledger = _mock_ledger_with_state()
+        ledger.best_trial.return_value = (best_trials or [None])[0]
 
         with patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
             worker = SystemtenderWorker.__new__(SystemtenderWorker)
             worker.config = config
-            worker.study = study
+            worker.ledger = ledger
             worker.systemtender_id = 'test-systemtender-id'
             worker.systemtender_uuid = 'test-uuid'
             worker.worker_id = 'test_worker_test-uuid'

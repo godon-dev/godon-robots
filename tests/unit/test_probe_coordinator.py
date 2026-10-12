@@ -72,25 +72,9 @@ def _config(params=None, **overrides):
     return cfg
 
 
-def _ensure_real_optuna():
-    """Restore real optuna — multiple test files mock it in sys.modules."""
-    import importlib
-    for mod in ['optuna.samplers', 'optuna.trial', 'optuna.storages', 'optuna']:
-        if mod in sys.modules:
-            obj = sys.modules[mod]
-            if not hasattr(obj, '__name__') or obj.__name__ != 'optuna':
-                del sys.modules[mod]
-    if 'optuna' not in sys.modules or getattr(sys.modules.get('optuna'), '__name__', '') != 'optuna':
-        import optuna
-        sys.modules['optuna'] = optuna
-        sys.modules['optuna.storages'] = optuna.storages
-        sys.modules['optuna.trial'] = optuna.trial
-        sys.modules['optuna.samplers'] = optuna.samplers
-
 
 def _make_coordinator(config=None, params=None, **overrides):
     """Create a coordinator with mocked DB."""
-    _ensure_real_optuna()
     config = config or _config(params=params, **overrides)
     coord = ProbeCoordinator(
         systemtender_id='test-sender-1',

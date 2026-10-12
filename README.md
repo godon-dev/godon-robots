@@ -31,7 +31,6 @@ The system follows an **engine + strains** architecture: the engine (`engine/`) 
 ### Strains (`strains/`)
 
 Each strain provides domain-specific logic as a pluggable module:
-- `suggest_params(trial, settings)` — parameter suggestion for the next trial
 - `validate_config(config)` — configuration validation (preflight checks)
 
 ### Effectuation (`effectuation/`)

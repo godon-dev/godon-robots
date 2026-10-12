@@ -64,7 +64,8 @@ fake_otel.get_logger = lambda name: MagicMock()
 sys.modules['f.systemtender.shared.otel_logging'] = fake_otel
 
 # Pre-populate engine module stubs
-for module_name in ['systemtender_worker', 'systemtender_metrics_client', 'strain_loader']:
+for module_name in ['systemtender_worker', 'systemtender_metrics_client',
+                    'strain_loader', 'trial_ledger']:
     stub = FakeModule()
     sys.modules[f'f.systemtender.engine.{module_name}'] = stub
 
@@ -90,6 +91,9 @@ populate_stub_module(sys.modules['f.systemtender.engine.systemtender_metrics_cli
 
 import engine.strain_loader as strain_loader
 populate_stub_module(sys.modules['f.systemtender.engine.strain_loader'], strain_loader)
+
+import engine.trial_ledger as trial_ledger
+populate_stub_module(sys.modules['f.systemtender.engine.trial_ledger'], trial_ledger)
 
 # Import strain modules and populate stubs
 import strains.linux_performance.parameter_registry as parameter_registry

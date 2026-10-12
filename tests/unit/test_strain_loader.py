@@ -65,8 +65,8 @@ class TestValidateStrain:
         with pytest.raises(ValueError, match="missing required attributes"):
             _validate_strain(module, 'broken_strain')
 
-    def test_missing_both_raises(self):
+    def test_missing_validation_raises(self):
         module = MagicMock(spec=[])
-        with pytest.raises(ValueError, match="suggest_params") as exc_info:
+        with pytest.raises(ValueError, match="validate_config") as exc_info:
             _validate_strain(module, 'broken_strain')
         assert 'validate_config' in str(exc_info.value)
