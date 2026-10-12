@@ -15,7 +15,6 @@ sys.modules.setdefault('wmill', MagicMock())
 sys.modules.setdefault('optuna', MagicMock())
 sys.modules.setdefault('optuna.storages', MagicMock())
 sys.modules.setdefault('optuna.trial', MagicMock())
-sys.modules.setdefault('optuna.samplers', MagicMock())
 
 # Mock the Windmill package namespace so the worker's internal imports resolve
 sys.modules['f'] = MagicMock()
@@ -28,8 +27,6 @@ sys.modules['f.systemtender.engine.probe_coordinator'] = MagicMock()
 sys.modules['f.systemtender.engine.probe_coordinator'].ProbeCoordinator = MagicMock
 sys.modules['f.systemtender.engine.systemtender_metrics_client'] = MagicMock()
 sys.modules['f.systemtender.engine.systemtender_metrics_client'].SystemtenderMetricsClient = MagicMock
-sys.modules['f.systemtender.engine.communication'] = MagicMock()
-sys.modules['f.systemtender.engine.communication'].CommunicationCallback = MagicMock
 sys.modules['f.systemtender.engine.strain_loader'] = MagicMock()
 sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
 
@@ -59,7 +56,6 @@ def _worker_with_ordered_init():
     room announcement."""
     order = []
     with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=MagicMock()), \
-         patch.object(SystemtenderWorker, '_setup_communication', return_value=MagicMock()), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_compute_neutral_params',
                       return_value={'param_0': 50.0}), \
@@ -99,7 +95,6 @@ def test_pure_optimizer_skips_boot_park():
     config = _config()
     del config['interference_detection']
     with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=MagicMock()), \
-         patch.object(SystemtenderWorker, '_setup_communication', return_value=MagicMock()), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_execute_trial') as trial:
         worker = SystemtenderWorker(config)

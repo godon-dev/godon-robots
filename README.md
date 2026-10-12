@@ -1,13 +1,12 @@
 # godon-robots
 
-The robot runtime of godon: autonomous workers that tend live systems — probing, holding, walking, and optimizing on shared substrates, by lease and by turn.
+The robot runtime of godon: autonomous workers that tend live systems — probing, holding, and walking on shared substrates, by lease and by turn.
 
 ## What a robot does
 
 One robot = one lease-holder on a live system. Its day is a cycle of bounded trials:
 
-- **Optimize** — own-work trials: apply a parameter suggestion, measure the effect, keep or roll back. Guardrails are checked before and after every push; rollback restores the prior state.
-- **Walk** — characterization: sweep a parameter axis step by step to map the system's response curve. Walks feed the atlas — the connectome of the system.
+- **Walk** — own-work trials: sweep a parameter axis step by step to map the system's response curve. Walks feed the atlas — the connectome of the system. Guardrails are checked before and after every push; rollback restores the prior state.
 - **Hold** — stand still during another robot's walk: interference detection needs quiet receivers.
 - **Pause** — rest at the neutral point between pushes; the target becomes a sensor, not an actuator.
 
@@ -17,7 +16,7 @@ The feeler protocol runs through all modes: touch gently (a bounded push), belie
 
 Trials are coordinated over an **Optuna database** (ask/tell storage, shared between robots). Effectuation and reconnaissance run as Windmill scripts on the target systems. Walk policies read the causal notebook page for the system group to choose the next probe level.
 
-The system follows an **engine + strains** architecture: the engine (`engine/`) provides the generic trial loop — lifecycle, lease and turn-taking, algorithm diversity across parallel robots, guardrail checking, rollback, cooperative trial sharing, metrics — while strains (`strains/`) encapsulate domain-specific knowledge (parameter suggestion, validation).
+The system follows an **engine + strains** architecture: the engine (`engine/`) provides the generic trial loop — lifecycle, lease and turn-taking, guardrail checking, rollback, metrics — while strains (`strains/`) encapsulate domain-specific knowledge (parameter registries, preflight validation, per-dial suggestion logic).
 
 ### Engine (`engine/`)
 
@@ -26,8 +25,6 @@ The system follows an **engine + strains** architecture: the engine (`engine/`) 
 - **Characterization** — response curve interpolation and convergence detection
 - **WalkPolicy** — stateless walk policy over the causal notebook page: picks the next level from banked measurements
 - **CoverageWalk** — deterministic coverage walk over per-parameter level spaces
-- **Watermark** — impulse watermark generation for detection probes
-- **Communication** — cooperative trial sharing between robots via the shared Optuna store (probabilistic, best, worst, extremes strategies)
 - **SystemtenderMetricsClient** — Prometheus metrics via Push Gateway
 - **Strain loader** — dynamic loading and contract validation of strain modules
 
@@ -61,16 +58,16 @@ Common modules used across engine, strains, and scripts — OTel logging and hel
 ## Available Strains
 
 ### linux_performance (`strains/linux_performance/`)
-Optimizes Linux system parameters (sysctl, sysfs, cpufreq, ethtool) for improved performance. Supports network, memory, CPU, and custom optimization objectives via Prometheus metrics.
+Tends Linux system parameters (sysctl, sysfs, cpufreq, ethtool). Supports network, memory, CPU, and custom objectives via Prometheus metrics.
 
 ### bench_greenhouse (`strains/bench_greenhouse/`)
-Optimizes greenhouse climate simulation parameters. Supports multi-zone heating, ventilation, shading, CO2 injection, lighting, and irrigation. Designed for the `godon-bench-greenhouse` simulation container with HTTP-based effectuation and reconnaissance.
+Tends greenhouse climate simulation parameters. Supports multi-zone heating, ventilation, shading, CO2 injection, lighting, and irrigation. Designed for the `godon-bench-greenhouse` simulation container with HTTP-based effectuation and reconnaissance.
 
 ### bench_generic (`strains/bench_generic/`)
 Domain knowledge for a configurable synthetic coupling bench: parameter registry and suggestion logic, used as validation ground truth.
 
 ### bench_microgrid (`strains/bench_microgrid/`)
-Domain knowledge for microgrid simulation optimization: parameter registry, preflight validation, and suggestion logic for power grid management.
+Domain knowledge for microgrid simulation: parameter registry, preflight validation, and suggestion logic for power grid management.
 
 ## License
 

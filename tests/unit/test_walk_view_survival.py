@@ -112,5 +112,5 @@ class TestRunLoopSurvivesDarkView:
         coord._push_count = 0
         coord._current_probe = None
         result = coord._handle_probe_push(trial=None)
-        assert result.get('mode') in ('hold', 'optimize'), \
+        assert result.get('mode') == 'hold', \
             "a dark view must park one trial, not die and not advance"

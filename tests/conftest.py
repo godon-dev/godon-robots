@@ -19,7 +19,6 @@
 
 import sys
 import os
-import types
 from unittest.mock import MagicMock
 
 sys.modules['wmill'] = MagicMock()
@@ -65,7 +64,7 @@ fake_otel.get_logger = lambda name: MagicMock()
 sys.modules['f.systemtender.shared.otel_logging'] = fake_otel
 
 # Pre-populate engine module stubs
-for module_name in ['systemtender_worker', 'systemtender_metrics_client', 'communication', 'strain_loader']:
+for module_name in ['systemtender_worker', 'systemtender_metrics_client', 'strain_loader']:
     stub = FakeModule()
     sys.modules[f'f.systemtender.engine.{module_name}'] = stub
 
@@ -89,9 +88,6 @@ def populate_stub_module(stub_module, source_module):
 import engine.systemtender_metrics_client as systemtender_metrics_client
 populate_stub_module(sys.modules['f.systemtender.engine.systemtender_metrics_client'], systemtender_metrics_client)
 
-import engine.communication as communication
-populate_stub_module(sys.modules['f.systemtender.engine.communication'], communication)
-
 import engine.strain_loader as strain_loader
 populate_stub_module(sys.modules['f.systemtender.engine.strain_loader'], strain_loader)
 
@@ -113,10 +109,6 @@ populate_stub_module(sys.modules['f.systemtender.strains.bench_greenhouse.prefli
 
 import strains.bench_greenhouse.strain as gh_strain
 populate_stub_module(sys.modules['f.systemtender.strains.bench_greenhouse.strain'], gh_strain)
-
-sys.modules['f.systemtender.engine.watermark'] = types.ModuleType('f.systemtender.engine.watermark')
-sys.modules['f.systemtender.engine.watermark'].create_watermark = lambda *a, **kw: None
-sys.modules['f.systemtender.engine.watermark'].Watermark = type('Watermark', (), {})
 
 import engine.systemtender_worker as systemtender_worker
 populate_stub_module(sys.modules['f.systemtender.engine.systemtender_worker'], systemtender_worker)
