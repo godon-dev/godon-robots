@@ -6,7 +6,7 @@ scripts:
   - pattern: "*.py"
     settings:
       summary: "Godon Systemtender Engine"
-      description: "Generic systemtender worker engine with strain-based optimization. Loads domain-specific strains for parameter suggestion and effectuation."
+      description: "Generic systemtender worker engine. Runs the trial loop — walks, holds, leases, guardrails, rollback, metrics — and loads domain-specific strains for the dial set."
       tag: "robot"
       # windmill is our job fabric, not our lifecycle policy: the tender's
       # end is declared by the worker itself and bounded by the cell

@@ -29,7 +29,6 @@ sys.modules['wmill'] = MagicMock()
 sys.modules['optuna'] = MagicMock()
 sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
-sys.modules['optuna.samplers'] = MagicMock()
 
 from engine.systemtender_worker import SystemtenderWorker
 
@@ -53,7 +52,6 @@ def _base_config(**overrides):
 def _create_worker(**config_overrides):
     config = _base_config(**config_overrides)
     with patch.object(SystemtenderWorker, '_load_or_create_study') as mock_study, \
-         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
         mock_study.return_value = MagicMock()

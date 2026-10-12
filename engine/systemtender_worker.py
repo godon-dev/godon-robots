@@ -27,26 +27,13 @@
 import optuna
 import json
 import os
-import random
-import hashlib
 import datetime
 import dateutil.parser
 import threading
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from optuna.trial import TrialState
-from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
-from optuna.samplers.nsgaii import (
-    UniformCrossover,
-    UNDXCrossover,
-    SPXCrossover,
-    BLXAlphaCrossover,
-    SBXCrossover,
-    VSBXCrossover
-)
-from scipy.stats import percentileofscore
 from f.systemtender.engine.systemtender_metrics_client import SystemtenderMetricsClient
-from f.systemtender.engine.communication import CommunicationCallback
 from f.systemtender.engine.strain_loader import load_strain
 
 from f.systemtender.shared.otel_logging import get_logger
@@ -107,12 +94,6 @@ class SystemtenderWorker:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        # Role ledger: own-work trials (optimize + walk) consume the
-        # iteration cap. Hold trials — standing still during someone
-        # else's walk — are cooperation, not budget spend, and never
-        # consume it (seed-50: followers died at cap having never
-        # walked).
-        self._own_trials = 0
         systemtender_config = config.get('systemtender', {})
 
         self.systemtender_type = systemtender_config.get('type', 'unknown_systemtender')
@@ -141,12 +122,9 @@ class SystemtenderWorker:
             _parsed_start = _parsed_start.replace(tzinfo=datetime.timezone.utc)
         self.start_time = _parsed_start
 
-        self.sampler_type = self._assign_sampler()
-
         self.study = self._load_or_create_study()
         # the liveness beater: a daemon thread outside the trial cadence
         self.start_heartbeat()
-        self.communication_callback = self._setup_communication()
 
         # Initialize probe coordinator
         from f.systemtender.engine.probe_coordinator import ProbeCoordinator
@@ -176,8 +154,6 @@ class SystemtenderWorker:
             logger.info(f"Rollback strategy: {self.rollback_config.get('strategy', 'unknown')}")
             self._init_rollback_state()
 
-        self._trial_durations = []
-
         self._last_heartbeat_ts = 0
         self._heartbeat_interval = 120
         # Wish serving (steer mode): adopted at the pulse, held at the
@@ -196,13 +172,6 @@ class SystemtenderWorker:
 
         self._register_interference_systemtender()
 
-        # Legacy spectral watermark system REMOVED.
-        # Block design coordinated detection (push/pause/hold via DetectionCoordinator)
-        # replaces it entirely.
-        self._watermark_baseline = self._compute_baseline_params(config.get('settings', {}))
-
-        # Detection coordinator — initialized in __init__
-
         self._update_state()
 
         self.metrics = SystemtenderMetricsClient(
@@ -210,117 +179,6 @@ class SystemtenderWorker:
             worker_id=self.worker_id,
             systemtender_type=self.systemtender_type
         )
-
-    def _assign_sampler(self) -> str:
-        parallel_workers = self.config.get('run', {}).get('parallel', 1)
-
-        if parallel_workers <= 1:
-            logger.info("Single worker mode, using default TPE sampler")
-            return 'tpe'
-
-        all_samplers = ['tpe', 'nsga2', 'random', 'nsga3', 'qmc']
-        num_samplers = min(parallel_workers, len(all_samplers))
-        available_samplers = all_samplers[:num_samplers]
-
-        worker_hash = int(hashlib.md5(self.worker_id.encode()).hexdigest(), 16)
-        sampler_index = worker_hash % len(available_samplers)
-        assigned_sampler = available_samplers[sampler_index]
-
-        logger.info(f"Algorithm diversity auto-enabled ({len(available_samplers)} samplers for {parallel_workers} workers): Worker {self.worker_id} assigned '{assigned_sampler}' sampler")
-        return assigned_sampler
-
-    def _create_sampler(self, sampler_type: str) -> optuna.samplers.BaseSampler:
-
-        sampler_profiles = {
-            'tpe': {
-                'multivariate_group': [(True, True), (True, False), (False, False)],
-                'constant_liar': [True, False],
-                'n_startup_trials': [5, 10, 20]
-            },
-            'nsga2': {
-                'population_size': [30, 50, 75, 100, 125, 150],
-                'mutation_prob': [0.05, 0.1, 0.15],
-                'crossover_prob': [0.8, 0.9, 0.95],
-                'crossover': ['uniform', 'UNDX', 'SPX', 'BLXAlpha', 'SBX', 'VSBX']
-            },
-            'nsga3': {
-                'population_size': [50, 100]
-            },
-            'random': {
-                'seed': [None]
-            },
-            'qmc': {
-                'seed': [None]
-            }
-        }
-
-        if sampler_type == 'tpe':
-            profile = sampler_profiles['tpe']
-            multivariate, group = random.choice(profile['multivariate_group'])
-
-            config = {
-                'multivariate': multivariate,
-                'group': group,
-                'constant_liar': random.choice(profile['constant_liar']),
-                'n_startup_trials': random.choice(profile['n_startup_trials'])
-            }
-            logger.info(f"Created TPE sampler with config: {config}")
-            return TPESampler(**config)
-
-        elif sampler_type == 'nsga2':
-            profile = sampler_profiles['nsga2']
-            population_size = random.choice(profile['population_size'])
-            crossover_name = random.choice(profile['crossover'])
-
-            if crossover_name == 'uniform':
-                crossover_obj = UniformCrossover()
-            elif crossover_name == 'UNDX':
-                population_size = max(population_size, 3)
-                crossover_obj = UNDXCrossover()
-            elif crossover_name == 'SPX':
-                population_size = max(population_size, 3)
-                crossover_obj = SPXCrossover()
-            elif crossover_name == 'BLXAlpha':
-                crossover_obj = BLXAlphaCrossover()
-            elif crossover_name == 'SBX':
-                crossover_obj = SBXCrossover()
-            elif crossover_name == 'VSBX':
-                crossover_obj = VSBXCrossover()
-            else:
-                logger.warning(f"Unknown crossover '{crossover_name}', falling back to UniformCrossover")
-                crossover_obj = UniformCrossover()
-
-            config = {
-                'population_size': population_size,
-                'mutation_prob': random.choice(profile['mutation_prob']),
-                'crossover_prob': random.choice(profile['crossover_prob']),
-                'crossover': crossover_obj
-            }
-            logger.info(f"Created NSGAII sampler with crossover={crossover_name}, config: {config}")
-            return NSGAIISampler(**config)
-
-        elif sampler_type == 'nsga3':
-            profile = sampler_profiles['nsga3']
-            population_size = random.choice(profile['population_size'])
-            config = {'population_size': population_size}
-            logger.info(f"Created NSGAIII sampler with config: {config}")
-            return NSGAIIISampler(**config)
-
-        elif sampler_type == 'random':
-            seed = random.choice(sampler_profiles['random']['seed'])
-            config = {'seed': seed} if seed is not None else {}
-            logger.info(f"Created Random sampler with config: {config}")
-            return RandomSampler(**config)
-
-        elif sampler_type == 'qmc':
-            seed = random.choice(sampler_profiles['qmc']['seed'])
-            config = {'seed': seed} if seed is not None else {}
-            logger.info(f"Created QMC sampler with config: {config}")
-            return QMCSampler(**config)
-
-        else:
-            logger.warning(f"Unknown sampler '{sampler_type}', falling back to TPE")
-            return TPESampler()
 
     def _get_db_url(self) -> str:
         import os
@@ -377,16 +235,6 @@ class SystemtenderWorker:
                     except Exception:
                         pass
         raise last_error
-
-    def _compute_baseline_params(self, settings: Dict[str, Any]) -> Dict[str, float]:
-        baseline = {}
-        for key, spec in settings.items():
-            constraints = spec.get('constraints', [])
-            if constraints and len(constraints) > 0:
-                lower = constraints[0].get('lower', 0)
-                upper = constraints[0].get('upper', 1)
-                baseline[key] = (lower + upper) / 2.0
-        return baseline
 
     def _compute_neutral_params(self) -> Optional[Dict[str, Any]]:
         """Compute neutral hold params in strain format (midpoints of constraint ranges).
@@ -478,11 +326,7 @@ class SystemtenderWorker:
         the room (registration). The bench boots at param_lower - the
         dials' extreme - and a registration that outran the first park
         let the room's first measurement window bank that extreme as
-        whoever probed first. Pure optimizers own their boot state:
-        no interference section, no park, no registration either."""
-        det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
-        if not det_cfg:
-            return
+        whoever probed first."""
         try:
             neutral = self._compute_neutral_params()
         except Exception as e:
@@ -504,8 +348,7 @@ class SystemtenderWorker:
         created by registration; this only ever updates, so it can
         never create ghost systemtenders.
         """
-        det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
-        if not det_cfg or not params:
+        if not params:
             return
         def op(conn):
             cur = conn.cursor()
@@ -529,24 +372,6 @@ class SystemtenderWorker:
             return
         self._register_interference_systemtender()
 
-    def _has_active_neighbors(self) -> bool:
-        def op(conn):
-            cur = conn.cursor()
-            active_window = str(self._probe_coordinator.active_systemtender_window)
-            cur.execute(
-                "SELECT COUNT(*) FROM interference_active_systemtenders "
-                "WHERE group_id = %s AND systemtender_id != %s "
-                "AND last_seen > NOW() - INTERVAL '" + active_window + " seconds'",
-                (self._group_id, self.systemtender_id)
-            )
-            count = cur.fetchone()[0]
-            cur.close()
-            return count > 0
-        try:
-            return self._with_shared_db(op, "has_active_neighbors")
-        except Exception:
-            return False
-
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
         """Get effectuation params from the best warmup trial for hold mode.
         
@@ -558,7 +383,7 @@ class SystemtenderWorker:
 
         best_trial = None
         best_value = None
-        # Check optimization direction for first objective
+        # Check objective direction for first objective
         objectives = self.config.get('objectives', [])
         minimize = objectives and objectives[0].get('direction', '').lower() == 'minimize'
         
@@ -621,11 +446,11 @@ class SystemtenderWorker:
         return results
 
     def _load_or_create_study(self) -> optuna.Study:
-        parallel_workers = self.config.get('run', {}).get('parallel', 1)
-        if parallel_workers > 1:
-            study_name = f"{self.systemtender_id}_{self.sampler_type}_study"
-        else:
-            study_name = f"{self.systemtender_id}_study"
+        # The study is the tender's trial ledger: one study per tender,
+        # every trial (probe push, hold, park) told to it with its
+        # values and attrs. No sampler is ever built — the walk is the
+        # only decider.
+        study_name = f"{self.systemtender_id}_study"
 
         directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
 
@@ -634,17 +459,11 @@ class SystemtenderWorker:
             study = optuna.load_study(study_name=study_name, storage=storage)
             logger.info(f"Loaded existing study: {study_name} with {len(study.trials)} trials")
         except (KeyError, ValueError):
-            sampler = None
-            if parallel_workers > 1:
-                sampler = self._create_sampler(self.sampler_type)
-                logger.info(f"Created study {study_name} with {self.sampler_type} sampler")
-
             try:
                 study = optuna.create_study(
                     study_name=study_name,
                     directions=directions,
                     storage=storage,
-                    sampler=sampler
                 )
                 logger.info(f"Created new study: {study_name}")
             except (optuna.exceptions.StorageInternalError, Exception) as e:
@@ -655,40 +474,6 @@ class SystemtenderWorker:
                 logger.info(f"Loaded study after creation race: {study_name} with {len(study.trials)} trials")
 
         return study
-
-    def _setup_communication(self) -> Optional[CommunicationCallback]:
-        cooperation_config = self.config.get('cooperation', {})
-        parallel_workers = self.config.get('run', {}).get('parallel', 1)
-
-        if cooperation_config.get('active', False):
-            share_strategy = cooperation_config.get('share_strategy', 'probabilistic')
-            probability = cooperation_config.get('probability', 0.8)
-            top_percentile = cooperation_config.get('top_percentile', 0.2)
-            bottom_percentile = cooperation_config.get('bottom_percentile', 0.2)
-            min_trials_for_filtering = cooperation_config.get('min_trials_for_filtering', 10)
-            storage = self._get_db_url()
-
-            share_within_systemtender = parallel_workers > 1
-
-            logger.info(f"Communication enabled with strategy: {share_strategy}, share_within_systemtender: {share_within_systemtender}")
-            if share_strategy == "probabilistic":
-                logger.info(f"  Probability: {probability}")
-            else:
-                logger.info(f"  Top percentile: {top_percentile}, Bottom percentile: {bottom_percentile}")
-                logger.info(f"  Min trials for filtering: {min_trials_for_filtering}")
-
-            return CommunicationCallback(
-                storage=storage,
-                share_strategy=share_strategy,
-                probability=probability,
-                top_percentile=top_percentile,
-                bottom_percentile=bottom_percentile,
-                min_trials_for_filtering=min_trials_for_filtering,
-                share_within_systemtender=share_within_systemtender
-            )
-        else:
-            logger.info("Communication disabled")
-            return None
 
     def _run_reconnaissance(self, settings: Dict[str, Any] = None) -> Dict[str, float]:
         import wmill
@@ -911,13 +696,13 @@ class SystemtenderWorker:
             on_failure = strategy.get('on_failure', 'stop')
 
             if on_failure == 'stop':
-                logger.error("Rollback failed with on_failure=stop, halting optimization")
+                logger.error("Rollback failed with on_failure=stop, halting trials")
                 rollback_state['state'] = 'failed'
                 self._update_rollback_state(rollback_state)
                 raise
 
             elif on_failure == 'continue':
-                logger.warning("Rollback failed with on_failure=continue, continuing optimization")
+                logger.warning("Rollback failed with on_failure=continue, continuing trials")
                 rollback_state['state'] = 'failed'
                 self._update_rollback_state(rollback_state)
                 return False
@@ -1412,7 +1197,7 @@ class SystemtenderWorker:
                         logger.info(f"Pausing for {pause_duration} seconds after rollback")
                         time.sleep(pause_duration)
                     elif after_action == 'stop':
-                        logger.info("Rollback completed with after.action=stop, halting optimization")
+                        logger.info("Rollback completed with after.action=stop, halting trials")
                         break
 
                 trial = self._retry_op(
@@ -1465,8 +1250,6 @@ class SystemtenderWorker:
                         trial.set_user_attr('wish_id', self._wish['wish_id'])
                         trial.set_user_attr(
                             'role', 'hold' if detection_mode == 'hold' else 'probe')
-                    if detection_mode != 'hold':
-                        self._own_trials += 1
                     trial.set_user_attr('coord_state', self._probe_coordinator.get_state())
                     if hasattr(self._probe_coordinator, 'get_char_status'):
                         trial.set_user_attr('char_status', self._probe_coordinator.get_char_status())
@@ -1483,34 +1266,24 @@ class SystemtenderWorker:
                     if decision.get('lease_phase') is not None:
                         trial.set_user_attr('lease_phase', decision['lease_phase'])
 
-                    if detection_mode == 'optimize':
-                        # Normal optimization — sampler picks params
-                        params = self.strain.suggest_params(trial, self.config.get('settings', {}))
-                    else:
-                        # Hold or impulse mode — coordinator provides params
-                        params = decision.get('params')
-                        if not params:
-                            # Coordinator should always provide params for non-optimize modes.
-                            # FAIL to avoid random params contaminating detection.
-                            logger.error(
-                                f"Trial {trial.number}: mode={detection_mode} but no params "
-                                f"from coordinator — FAILing"
-                            )
-                            self._retry_op(
-                                lambda: self.study.tell(trial, state=TrialState.FAIL),
-                                f"study.tell FAIL no-coordinator-params (trial {trial.number})"
-                            )
-                            continue
+                    # Every trial's params arrive shaped from the
+                    # coordinator (probe push, hold, park) — the body
+                    # never picks settings itself.
+                    params = decision.get('params')
+                    if not params:
+                        # FAIL to avoid effectuating anything the room
+                        # did not decide.
+                        logger.error(
+                            f"Trial {trial.number}: mode={detection_mode} but no params "
+                            f"from coordinator — FAILing"
+                        )
+                        self._retry_op(
+                            lambda: self.study.tell(trial, state=TrialState.FAIL),
+                            f"study.tell FAIL no-coordinator-params (trial {trial.number})"
+                        )
+                        continue
 
-                    if params:
-                        metrics = self._execute_trial(params)
-                    else:
-                        logger.info(f"Watermark off phase — resetting to baseline then reconnaissance")
-                        try:
-                            self._execute_trial(self._watermark_baseline)
-                        except Exception as e:
-                            logger.warning(f"Baseline effectuation failed (non-fatal): {e}")
-                        metrics = self._run_reconnaissance()
+                    metrics = self._execute_trial(params)
 
                     guardrails_violated, violations = self._check_guardrails(metrics)
 
@@ -1632,14 +1405,6 @@ class SystemtenderWorker:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         self._handle_successful_trial(params)
-
-                        if self.communication_callback:
-                            frozen_trial = self.study.trials[-1]
-                            self.communication_callback(self.study, frozen_trial)
-
-                            coop_config = self.config.get('cooperation', {})
-                            share_strategy = coop_config.get('share_strategy', 'unknown')
-                            self.metrics.inc_trial_shared(share_strategy)
 
                     trial_count += 1
                     if trial_count % 5 == 0:

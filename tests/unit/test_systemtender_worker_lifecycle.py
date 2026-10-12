@@ -29,7 +29,6 @@ sys.modules['wmill'] = MagicMock()
 sys.modules['optuna'] = MagicMock()
 sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
-sys.modules['optuna.samplers'] = MagicMock()
 
 # Mock Windmill package namespace so systemtender_worker's internal imports resolve
 sys.modules['f'] = MagicMock()
@@ -39,13 +38,8 @@ sys.modules['f.systemtender.engine.probe_coordinator'] = MagicMock()
 sys.modules['f.systemtender.engine.probe_coordinator'].ProbeCoordinator = MagicMock
 sys.modules['f.systemtender.engine.systemtender_metrics_client'] = MagicMock()
 sys.modules['f.systemtender.engine.systemtender_metrics_client'].SystemtenderMetricsClient = MagicMock
-sys.modules['f.systemtender.engine.communication'] = MagicMock()
-sys.modules['f.systemtender.engine.communication'].CommunicationCallback = MagicMock
 sys.modules['f.systemtender.engine.strain_loader'] = MagicMock()
 sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
-sys.modules['f.systemtender.engine.watermark'] = MagicMock()
-sys.modules['f.systemtender.engine.watermark'].create_watermark = MagicMock(return_value=None)
-sys.modules['f.systemtender.engine.watermark'].Watermark = MagicMock
 sys.modules['f.systemtender.shared'] = MagicMock()
 sys.modules['f.systemtender.shared.otel_logging'] = MagicMock()
 sys.modules['f.systemtender.shared.otel_logging'].get_logger = MagicMock(return_value=MagicMock())
@@ -89,7 +83,6 @@ def _create_worker(**config_overrides):
     study = _mock_study()
 
     with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
-         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
         worker = SystemtenderWorker(config)
@@ -163,7 +156,6 @@ class TestShouldContinue:
     def test_continues_with_no_budget_config(self):
         worker = self._worker()
         worker.study.trials = [MagicMock() for _ in range(500)]
-        worker._own_trials = 500
         assert worker._should_continue() is True
 
     def test_stops_on_shutdown_requested(self):
@@ -199,7 +191,6 @@ class TestWorkerInit:
 
         with pytest.raises(ValueError, match="creation_ts"):
             with patch.object(SystemtenderWorker, '_load_or_create_study'), \
-                 patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
                  patch.object(SystemtenderWorker, '_update_state'), \
                  patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
                 SystemtenderWorker(config)
@@ -313,32 +304,6 @@ class TestRunLoop:
             mock_metrics.purge_stale_series.assert_called_once()
             mock_metrics.push.assert_called()
 
-    def test_run_shares_trial_with_communication(self):
-        worker = self._run_loop_worker()
-
-        mock_strain = MagicMock()
-        mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
-        worker.strain = mock_strain
-
-        mock_comm = MagicMock()
-        worker.communication_callback = mock_comm
-
-        # Mock the detection coordinator to return optimize mode with no params
-        worker._probe_coordinator.decide_trial.return_value = {
-            'mode': 'optimize', 'params': None
-        }
-
-        with patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
-             patch.object(worker, '_check_guardrails', return_value=(False, [])), \
-             patch.object(worker, 'metrics'):
-            worker.run()
-
-        mock_comm.assert_called_once()
-        call_args = mock_comm.call_args
-        assert call_args[0][0] == worker.study
-        assert len(worker.study.trials) == 1
-
-
 class TestRunReconnaissance:
     def setup_method(self):
         sys.modules['wmill'].reset_mock()
@@ -426,14 +391,16 @@ class TestPublishStandingParams:
                         'request to database systemtender_x timed out')
         assert SystemtenderWorker._is_retryable_error(err) is True
 
-    def test_skips_without_detection_section(self):
-        worker = _create_worker()  # base config: pure optimizer
+    def test_publishes_without_detection_section(self):
+        """Standing params publish on every trial — room participation
+        does not depend on the dress section being present."""
+        worker = _create_worker()
         called = []
         worker._with_shared_db = lambda op, desc=None: called.append(desc)
 
         worker._publish_standing_params({'param_0': 50.0})
 
-        assert called == []
+        assert called == ['publish_standing_params']
 
     def test_skips_on_empty_params(self):
         worker = _create_worker(interference_detection={'group': 'g1'})
@@ -448,7 +415,7 @@ class TestPublishStandingParams:
 class TestObservationPublishGate:
     """Which trials publish their own readings: every trial with a
     protocol phase in flight (receiver hold, sender push, sender
-    pause). Parked and optimizer trials publish nothing."""
+    pause). Parked trials publish nothing."""
 
     def test_phase_discriminator(self):
         gate = lambda d: d.get('lease_phase') or d.get('impulse_phase')
@@ -457,13 +424,11 @@ class TestObservationPublishGate:
         sender_push = {'mode': 'impulse', 'impulse_phase': 'probe_push'}
         sender_pause = {'mode': 'hold', 'impulse_phase': 'probe_pause'}
         parked = {'mode': 'hold'}
-        optimize = {'mode': 'optimize'}
 
         assert gate(receiver_hold) == 'probe_push'
         assert gate(sender_push) == 'probe_push'
         assert gate(sender_pause) == 'probe_pause'
         assert gate(parked) is None
-        assert gate(optimize) is None
 
 
 class TestHeartbeatBurst:

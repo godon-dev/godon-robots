@@ -34,9 +34,7 @@ sys.modules['f.systemtender.shared.otel_logging'] = otel_mock
 for mod_path in ['f', 'f.systemtender', 'f.systemtender.engine',
                  'f.systemtender.engine.probe_coordinator',
                  'f.systemtender.engine.systemtender_metrics_client',
-                 'f.systemtender.engine.communication',
-                 'f.systemtender.engine.strain_loader',
-                 'f.systemtender.engine.watermark']:
+                 'f.systemtender.engine.strain_loader']:
     parts = mod_path.split('.')
     parent = '.'.join(parts[:-1]) if len(parts) > 1 else None
     mock_mod = types.ModuleType(mod_path)
@@ -46,10 +44,7 @@ for mod_path in ['f', 'f.systemtender', 'f.systemtender.engine',
 
 sys.modules['f.systemtender.engine.probe_coordinator'].ProbeCoordinator = MagicMock
 sys.modules['f.systemtender.engine.systemtender_metrics_client'].SystemtenderMetricsClient = MagicMock
-sys.modules['f.systemtender.engine.communication'].CommunicationCallback = MagicMock
 sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
-sys.modules['f.systemtender.engine.watermark'].create_watermark = MagicMock(return_value=None)
-sys.modules['f.systemtender.engine.watermark'].Watermark = MagicMock
 wmill_mock = types.ModuleType('wmill')
 wmill_mock.run_script_by_path = MagicMock()
 sys.modules['wmill'] = wmill_mock
@@ -94,7 +89,6 @@ def _make_worker_with_trials(trials):
     study = MagicMock()
     study.trials = list(trials)
     with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
-         patch.object(SystemtenderWorker, '_setup_communication', return_value=None), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_register_interference_systemtender'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):

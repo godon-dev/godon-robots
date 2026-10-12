@@ -13,44 +13,33 @@ No separate detection phase. No extremistic top-3 push. Detection and
 characterization are the same process at different completeness.
 
 PROBE STRATEGY (what gets pushed):
-  ONE Optuna study with all params as dimensions. Each trial samples
-  a categorical (which param to push) and a stepped float (at what
-  level). TPE picks both — no coverage guard, no round-robin. The
-  sampler's startup randomness IS the coverage pass.
-
-  Direction is maximize — high delta means the interpolated surface
-  is still moving (informative region). TPE concentrates sampling
-  where delta is high and ignores dead params.
-
-  Disposable studies for refinement: can't change step mid-study, so
-  close and create new at halved step. Curves persist in causal's
-  CurveRegistry across studies.
+  The walk picks which param to push and at which level: round-robin
+  across params (converged params retired), farthest-point level order
+  within each. The notebook policy (default) steers from causal's
+  banked curves; the geometric ladder exists as an explicit offline
+  opt-in. The push config is one param at the walked level, all
+  others at neutral.
 
   INFINITY catching: causal returns f64::MAX/2 for the first point
   on each curve (no prior to compare). Coordinator catches this and
-  replaces with 1.0 before telling the study.
-
-  One trial, dual feed: the physical measurement feeds both the
-  optimization study (objective values, immediate tell) and the
-  characterization study (delta, delayed tell after pause + causal).
+  replaces with 1.0 before logging.
 
 FIRST level producing receiver response above CFAR threshold = detection.
 ACCUMULATED levels across a param = characterization (response curve).
 Convergence delta (interpolation change) = halting + drift detection.
 
 States:
-  OPTIMIZE    — Normal optimization, accumulate baseline
+  IDLE        — Listening: park at neutral, watch for a sender or an
+                acquire opportunity
   PROBE_PUSH  — Sender: push at scheduled level for N trials
   PROBE_PAUSE — Sender: return to neutral for N trials (reversibility)
   DONE        — Release lease
   COOLDOWN    — Wait before re-acquiring (turn-taking fairness)
   HOLD        — Receiver: hold neutral while sender probes
 
-  Protocol participants park at neutral whenever they are not
-  pushing: DONE, cooldowns, idle waiting and hold exits all apply
-  the neutral hold params — the optimizer drives params only inside
-  a push block. A systemtender without an interference_detection section
-  is a pure optimizer; the coordinator passes through.
+  Every participant parks at neutral whenever it is not pushing:
+  DONE, cooldowns, idle waiting and hold exits all apply the neutral
+  hold params — a dial only moves inside a push block.
 
 Coordination: group-scoped fencing-token lease in shared DB.
 One sender at a time per group. Crash recovery via heartbeat staleness.
@@ -86,7 +75,7 @@ class ProbeCoordinator:
     """
 
     # States
-    OPTIMIZE = "optimize"
+    IDLE = "idle"
     PROBE_PUSH = "probe_push"
     PROBE_PAUSE = "probe_pause"
     DONE = "done"
@@ -120,12 +109,6 @@ class ProbeCoordinator:
         self.push_block_size = det_cfg.get('push_block_size', 10)
         self.pause_block_size = det_cfg.get('pause_block_size', 10)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
-        # Protocol participation is derived, not configured: a systemtender
-        # with an interference_detection/detection section joins the
-        # probe protocol and parks at neutral whenever it is not
-        # pushing. A systemtender without the section is a pure optimizer —
-        # the coordinator passes through.
-        self._coordination_enabled = bool(det_cfg)
         self.active_systemtender_window = det_cfg.get(
             'active_systemtender_window', self.ACTIVE_SYSTEMTENDER_WINDOW_SECONDS)
 
@@ -167,11 +150,11 @@ class ProbeCoordinator:
         self._walk_transport = det_cfg.get('walk_transport')
 
         # State
-        self.state = self.OPTIMIZE
+        self.state = self.IDLE
         self._initialized = False
 
         # Counters
-        self._optimize_count = 0
+        self._idle_count = 0
         self._push_count = 0
         self._pause_count = 0
         self._cooldown_count = 0
@@ -1193,12 +1176,12 @@ class ProbeCoordinator:
         # Heartbeat for sender states
         if self.state in (self.PROBE_PUSH, self.PROBE_PAUSE):
             if not self._heartbeat():
-                logger.warning("Lost sender lease — returning to OPTIMIZE")
-                self.state = self.OPTIMIZE
+                logger.warning("Lost sender lease — returning to IDLE")
+                self.state = self.IDLE
                 return self._idle_result()
 
-        if self.state == self.OPTIMIZE:
-            return self._handle_optimize(trial)
+        if self.state == self.IDLE:
+            return self._handle_idle(trial)
         if self.state == self.PROBE_PUSH:
             return self._handle_probe_push(trial)
         if self.state == self.PROBE_PAUSE:
@@ -1210,14 +1193,14 @@ class ProbeCoordinator:
         if self.state == self.HOLD:
             return self._handle_hold(trial)
 
-        logger.warning(f"Unknown state {self.state} — resetting to OPTIMIZE")
-        self.state = self.OPTIMIZE
+        logger.warning(f"Unknown state {self.state} — resetting to IDLE")
+        self.state = self.IDLE
         return self._idle_result()
 
-    # ── OPTIMIZE ─────────────────────────────────────────────────────
+    # ── IDLE ─────────────────────────────────────────────────────────
 
-    def _handle_optimize(self, trial) -> Dict[str, Any]:
-        self._optimize_count += 1
+    def _handle_idle(self, trial) -> Dict[str, Any]:
+        self._idle_count += 1
 
         # Listening from trial 1: an active sender outranks everything.
         # A systemtender that exists can hold — there is no warmup before
@@ -1263,9 +1246,6 @@ class ProbeCoordinator:
 
         return self._idle_result()
 
-    def _optimize_result(self) -> Dict[str, Any]:
-        return {'mode': 'optimize', 'params': None, 'detection_trial': False}
-
     def _park_result(self, why: str) -> Dict[str, Any]:
         """Parked trial: hold neutral, no lease phase.
 
@@ -1275,14 +1255,12 @@ class ProbeCoordinator:
         """
         params = self._get_neutral_params()
         if not params:
-            logger.warning(f"PARK ({why}): no neutral params — optimizing instead")
-            return self._optimize_result()
+            logger.warning(f"PARK ({why}): no neutral params — trial will FAIL")
+            return {'mode': 'hold', 'params': None, 'detection_trial': False}
         return {'mode': 'hold', 'params': dict(params), 'detection_trial': False}
 
     def _idle_result(self) -> Dict[str, Any]:
-        if self._coordination_enabled:
-            return self._park_result('idle')
-        return self._optimize_result()
+        return self._park_result('idle')
 
     def _walk_pending(self) -> bool:
         """Non-advancing check: can the walk still produce a probe for
@@ -1444,8 +1422,8 @@ class ProbeCoordinator:
                     self.state = self.PROBE_PUSH
                     self._push_count = 0
                     return self._handle_probe_push(trial)
-            logger.info("COOLDOWN: done — back to OPTIMIZE")
-            self.state = self.OPTIMIZE
+            logger.info("COOLDOWN: done — back to IDLE")
+            self.state = self.IDLE
         return self._idle_result()
 
     # ── HOLD (receiver) ──────────────────────────────────────────────
@@ -1455,22 +1433,22 @@ class ProbeCoordinator:
         # or the group's own count starves and the rota freezes.
         self._refresh_presence()
         if not self._has_active_sender():
-            logger.info("HOLD: sender finished — back to OPTIMIZE")
-            self.state = self.OPTIMIZE
+            logger.info("HOLD: sender finished — back to IDLE")
+            self.state = self.IDLE
             return self._idle_result()
 
         self._hold_count += 1
         if self._hold_count > self.MAX_HOLD_TRIALS:
             logger.warning(
                 f"HOLD: hit MAX_HOLD_TRIALS ({self.MAX_HOLD_TRIALS}) — "
-                f"returning to OPTIMIZE"
+                f"returning to IDLE"
             )
-            self.state = self.OPTIMIZE
+            self.state = self.IDLE
             return self._idle_result()
 
         params = self._get_neutral_params()
         if not params:
-            self.state = self.OPTIMIZE
+            self.state = self.IDLE
             return self._idle_result()
 
         phase = self._get_lease_phase()

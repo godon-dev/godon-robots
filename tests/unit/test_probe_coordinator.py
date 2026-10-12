@@ -63,7 +63,6 @@ def _config(params=None, **overrides):
             'push_block_size': 3,
             'pause_block_size': 3,
             'cooldown_trials': 1,
-            'min_optimize_trials': 2,
             'convergence_threshold': 0.02,
             'refinement_depth': 3,
             'walk_policy': 'ladder',  # offline: geometric, no notebook
@@ -796,7 +795,7 @@ def test_receiver_holds_from_first_trial():
     coord._db = lambda op, desc=None: True
 
     trial = types.SimpleNamespace(number=1)
-    result = coord._handle_optimize(trial)
+    result = coord._handle_idle(trial)
 
     assert coord.state == coord.HOLD, f"expected HOLD, got {coord.state}"
     assert result['mode'] == 'hold', f"expected hold, got {result}"
@@ -884,18 +883,19 @@ def test_done_parks_at_neutral():
     print("  PASS")
 
 
-def test_pure_optimizer_passes_through():
-    """A systemtender without an interference_detection section is a pure
-    optimizer: the coordinator passes through, it never parks."""
-    print("\n=== test_pure_optimizer_passes_through ===")
+def test_room_contract_is_unconditional():
+    """Room participation does not depend on the dress: a systemtender
+    without an interference_detection section still parks at neutral —
+    park, register, leases apply to every tender."""
+    print("\n=== test_room_contract_is_unconditional ===")
     cfg = _config()
     del cfg['interference_detection']
     coord = _make_coordinator(config=cfg)
-    assert coord._coordination_enabled is False
     coord._count_active_systemtenders = lambda: 1
-    result = coord._handle_optimize(types.SimpleNamespace(number=1))
-    assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
-    print("  no section → optimize pass-through, no park")
+    result = coord._handle_idle(types.SimpleNamespace(number=1))
+    assert result['mode'] == 'hold', f"expected park, got {result}"
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+    print("  no section → parks at neutral midpoints")
     print("  PASS")
 
 
@@ -910,7 +910,7 @@ def test_walk_complete_does_not_reacquire_lease():
     coord._count_active_systemtenders = lambda: 3
     coord._has_active_sender = lambda: False
     with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
-        result = coord._handle_optimize(types.SimpleNamespace(number=5))
+        result = coord._handle_idle(types.SimpleNamespace(number=5))
     acq.assert_not_called()
     assert result['mode'] == 'hold', f"expected park, got {result}"
     print("  walk complete → no acquire, parked")
@@ -923,7 +923,7 @@ def test_solo_protocol_systemtender_parks():
     print("\n=== test_solo_protocol_systemtender_parks ===")
     coord = _parked_coord()
     coord._count_active_systemtenders = lambda: 1
-    result = coord._handle_optimize(types.SimpleNamespace(number=1))
+    result = coord._handle_idle(types.SimpleNamespace(number=1))
     assert result['mode'] == 'hold'
     assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
     print("  solo → hold@50")
@@ -975,7 +975,7 @@ def test_cooldown_expiry_with_finished_walk_parks():
     with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
         result = coord._handle_cooldown(types.SimpleNamespace(number=1))
     acq.assert_not_called()
-    assert coord.state == coord.OPTIMIZE
+    assert coord.state == coord.IDLE
     assert result['mode'] == 'hold'
     print("  expiry, walk done → parked, no acquire")
     print("  PASS")
@@ -989,22 +989,22 @@ def test_hold_exit_parks():
     coord.state = coord.HOLD
     coord._db = lambda op, desc=None: False  # no active sender
     result = coord._handle_hold(types.SimpleNamespace(number=1))
-    assert coord.state == coord.OPTIMIZE
+    assert coord.state == coord.IDLE
     assert result['mode'] == 'hold'
     assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
     print("  hold exit → hold@50 through the gap")
     print("  PASS")
 
 
-def test_park_falls_back_when_no_neutral_params():
-    """No neutral params available → park degrades to the legacy
-    optimize return instead of failing the trial."""
-    print("\n=== test_park_falls_back_when_no_neutral_params ===")
+def test_park_without_neutral_params_fails_trial():
+    """No neutral params available → the parked trial carries no params
+    and the worker FAILs it — the body never invents settings."""
+    print("\n=== test_park_without_neutral_params_fails_trial ===")
     coord = _parked_coord()
     coord._get_neutral_params = lambda: None
     result = coord._park_result('test')
-    assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
-    print("  no neutral → optimize fallback")
+    assert result == {'mode': 'hold', 'params': None, 'detection_trial': False}
+    print("  no neutral → hold with no params (worker FAILs)")
     print("  PASS")
 
 
@@ -1216,7 +1216,7 @@ def test_walk_complete_publishes_demand_false():
 
     coord._db = lambda fn, desc=None: fn(_Conn())
 
-    result = coord._handle_optimize(types.SimpleNamespace(number=1))
+    result = coord._handle_idle(types.SimpleNamespace(number=1))
 
     assert result["mode"] == "hold", f"expected park, got {result}"
     pub = [(s, p) for s, p in zip(captured["sql"], captured["params"])
