@@ -35,7 +35,7 @@ STRAIN_MODULES = {
     "bench_generic": "f.systemtender.strains.bench_generic.strain",
 }
 
-REQUIRED_ATTRS = ("suggest_params", "validate_config")
+REQUIRED_ATTRS = ("validate_config",)
 
 
 def _validate_strain(module: Any, strain_type: str) -> None:

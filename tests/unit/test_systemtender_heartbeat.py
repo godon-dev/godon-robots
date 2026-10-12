@@ -27,7 +27,7 @@ def test_beat_once_touches_state_row_with_declared_interval():
     cur = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
-    with patch.object(w, '_get_db_url', return_value='postgresql://t-1'), \
+    with patch.object(w, '_get_libpq_url', return_value='postgresql://t-1'), \
             patch('psycopg2.connect', return_value=conn) as connect:
         w._beat_once()
 
@@ -117,7 +117,7 @@ def test_beat_ensures_interval_column_on_old_rows():
         None,
         None,
     ]
-    with patch.object(w, '_get_db_url', return_value='postgresql://t-1'), \
+    with patch.object(w, '_get_libpq_url', return_value='postgresql://t-1'), \
             patch('psycopg2.connect', return_value=conn):
         w._beat_once()
 

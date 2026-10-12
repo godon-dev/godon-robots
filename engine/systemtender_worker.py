@@ -24,7 +24,6 @@
 #psycopg2-binary
 #wmill
 
-import optuna
 import json
 import os
 import datetime
@@ -32,7 +31,7 @@ import dateutil.parser
 import threading
 import time
 from typing import Dict, Any, Optional
-from optuna.trial import TrialState
+from f.systemtender.engine.trial_ledger import TrialLedger, TrialRef, classify
 from f.systemtender.engine.systemtender_metrics_client import SystemtenderMetricsClient
 from f.systemtender.engine.strain_loader import load_strain
 
@@ -70,11 +69,6 @@ class SystemtenderWorker:
         for pattern in _RETRYABLE_DB_ERROR_PATTERNS:
             if pattern in exc_str:
                 return True
-        try:
-            if isinstance(exc, optuna.exceptions.StorageInternalError):
-                return True
-        except Exception:
-            pass
         return False
 
     def _retry_op(self, fn, description: str, max_retries: int = 4):
@@ -122,9 +116,21 @@ class SystemtenderWorker:
             _parsed_start = _parsed_start.replace(tzinfo=datetime.timezone.utc)
         self.start_time = _parsed_start
 
-        self.study = self._load_or_create_study()
+        self._init_ledger()
         # the liveness beater: a daemon thread outside the trial cadence
         self.start_heartbeat()
+        self._init_body(config)
+
+    def _init_ledger(self):
+        """The tender's own tables, over one direct connection. The
+        test seam: everything below speaks ledger verbs only."""
+        self.ledger = TrialLedger(self._get_libpq_url())
+        self.ledger.ensure_schema()
+        logger.info(f"Ledger ready: {self.ledger.count()} trials loaded")
+
+    def _init_body(self, config):
+        """Everything after the ledger: coordinator, targets, rollback,
+        wish state, the boot park."""
 
         # Initialize probe coordinator
         from f.systemtender.engine.probe_coordinator import ProbeCoordinator
@@ -180,24 +186,16 @@ class SystemtenderWorker:
             systemtender_type=self.systemtender_type
         )
 
-    def _get_db_url(self) -> str:
-        import os
-        db_config = {
-            'user': os.environ.get("GODON_ARCHIVE_DB_USER", "postgres"),
-            'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
-            'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
-            'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
-            'database': self.systemtender_db_name
-        }
-        # dialect pinned explicitly: sqlalchemy>=2.1 (2026-09-24) resolves
-        # bare postgresql:// to psycopg(3), which the env does not ship.
-        return f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-
     def _get_libpq_url(self):
-        """The optuna/SQLA URL carries the +psycopg2 dialect suffix; raw
-        psycopg2.connect() needs plain libpq form (invalid dsn otherwise).
-        """
-        return self._get_db_url().replace("postgresql+psycopg2://", "postgresql://")
+        """The ledger's connection string, plain libpq form."""
+        import os
+        pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'postgres')
+        user = os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')
+        host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+        port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')
+        sep, at = chr(58), chr(64)
+        return (f"postgresql://{user}" + sep + pw + at
+                + f"{host}:{port}/{self.systemtender_db_name}")
 
     def _get_shared_db_url(self) -> str:
         import os
@@ -243,14 +241,14 @@ class SystemtenderWorker:
         sensor, not an active controller. Used by the detection coordinator for
         receiver hold and sender pause phases.
         """
-        if not self.study or not self.study.trials:
+        if not self.ledger or not self.ledger.trials():
             return None
 
         # Get template from any completed trial's effectuation params
         template = None
-        for trial in self.study.trials:
-            if trial.state == TrialState.COMPLETE:
-                stashed = trial.user_attrs.get('effectuation_params')
+        for trial in self.ledger.trials():
+            if trial['state'] == 'COMPLETE':
+                stashed = trial['attrs'].get('effectuation_params')
                 if stashed:
                     template = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
                     break
@@ -378,7 +376,7 @@ class SystemtenderWorker:
         Uses the trial with the best objective value from the warmup phase
         as a stable operating baseline.
         """
-        if not self.study or not self.study.trials:
+        if not self.ledger or not self.ledger.trials():
             return None
 
         best_trial = None
@@ -386,14 +384,14 @@ class SystemtenderWorker:
         # Check objective direction for first objective
         objectives = self.config.get('objectives', [])
         minimize = objectives and objectives[0].get('direction', '').lower() == 'minimize'
-        
-        for trial in self.study.trials:
-            if trial.state != TrialState.COMPLETE:
+
+        for trial in self.ledger.trials():
+            if trial['state'] != 'COMPLETE':
                 continue
-            stashed = trial.user_attrs.get('effectuation_params')
+            stashed = trial['attrs'].get('effectuation_params')
             if not stashed:
                 continue
-            values = trial.values if hasattr(trial, 'values') else None
+            values = trial['values']
             if not values:
                 continue
             v = values[0]
@@ -411,12 +409,12 @@ class SystemtenderWorker:
             return json.loads(best_trial) if isinstance(best_trial, str) else dict(best_trial)
 
         # Fallback: last complete trial
-        for trial in reversed(self.study.trials):
-            if trial.state == TrialState.COMPLETE:
-                stashed = trial.user_attrs.get('effectuation_params')
+        for trial in reversed(self.ledger.trials()):
+            if trial['state'] == 'COMPLETE':
+                stashed = trial['attrs'].get('effectuation_params')
                 if stashed:
                     return json.loads(stashed) if isinstance(stashed, str) else stashed
-                return dict(trial.params)
+                return dict(trial['params'])
         return None
 
     def _collect_upper_bounds(self, obj: Any, depth: int = 0) -> list:
@@ -445,35 +443,9 @@ class SystemtenderWorker:
                 results.extend(self._collect_upper_bounds(val, depth + 1))
         return results
 
-    def _load_or_create_study(self) -> optuna.Study:
-        # The study is the tender's trial ledger: one study per tender,
-        # every trial (probe push, hold, park) told to it with its
-        # values and attrs. No sampler is ever built — the walk is the
-        # only decider.
-        study_name = f"{self.systemtender_id}_study"
-
-        directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
-
-        storage = optuna.storages.RDBStorage(url=self._get_db_url())
-        try:
-            study = optuna.load_study(study_name=study_name, storage=storage)
-            logger.info(f"Loaded existing study: {study_name} with {len(study.trials)} trials")
-        except (KeyError, ValueError):
-            try:
-                study = optuna.create_study(
-                    study_name=study_name,
-                    directions=directions,
-                    storage=storage,
-                )
-                logger.info(f"Created new study: {study_name}")
-            except (optuna.exceptions.StorageInternalError, Exception) as e:
-                logger.warning(f"Study creation failed ({e}), retrying as load...")
-                time.sleep(2)
-                storage = optuna.storages.RDBStorage(url=self._get_db_url())
-                study = optuna.load_study(study_name=study_name, storage=storage)
-                logger.info(f"Loaded study after creation race: {study_name} with {len(study.trials)} trials")
-
-        return study
+    def _objective_minimizes(self) -> bool:
+        objectives = self.config.get('objectives', [])
+        return bool(objectives and objectives[0].get('direction', '').lower() == 'minimize')
 
     def _run_reconnaissance(self, settings: Dict[str, Any] = None) -> Dict[str, float]:
         import wmill
@@ -574,7 +546,7 @@ class SystemtenderWorker:
     def _init_rollback_state(self) -> None:
         state_key = self._get_rollback_state_key()
 
-        existing_state = self.study.user_attrs.get(state_key)
+        existing_state = self.ledger.state_get(state_key)
         if existing_state:
             logger.debug(f"Rollback state already initialized for target {self.target_id}")
             return
@@ -587,20 +559,17 @@ class SystemtenderWorker:
             'version': 0
         }
 
-        self._retry_op(
-            lambda: self.study.set_user_attr(state_key, json.dumps(initial_state)),
-            "init_rollback_state"
-        )
+        self.ledger.state_put(state_key, json.dumps(initial_state))
         logger.info(f"Initialized rollback state for target {self.target_id}: {initial_state}")
 
     def _get_rollback_state(self) -> Dict[str, Any]:
         state_key = self._get_rollback_state_key()
-        state_json = self.study.user_attrs.get(state_key)
+        state_json = self.ledger.state_get(state_key)
 
         if not state_json:
             logger.warning(f"No rollback state found for target {self.target_id}, initializing")
             self._init_rollback_state()
-            state_json = self.study.user_attrs.get(state_key)
+            state_json = self.ledger.state_get(state_key)
 
         return json.loads(state_json)
 
@@ -609,10 +578,7 @@ class SystemtenderWorker:
 
         new_state['version'] = new_state.get('version', 0) + 1
 
-        self._retry_op(
-            lambda: self.study.set_user_attr(state_key, json.dumps(new_state)),
-            "update_rollback_state"
-        )
+        self.ledger.state_put(state_key, json.dumps(new_state))
         logger.debug(f"Updated rollback state for target {self.target_id}: version={new_state['version']}, state={new_state['state']}")
 
         return True
@@ -649,8 +615,9 @@ class SystemtenderWorker:
         if target_state == 'previous':
             params_to_restore = rollback_state.get('last_successful_params')
         elif target_state == 'best':
-            if self.study.best_trials:
-                params_to_restore = self.study.best_trials[0].params
+            best = self.ledger.best_trial(minimize=self._objective_minimizes())
+            if best:
+                params_to_restore = best['params']
             else:
                 logger.error("Cannot rollback to 'best': no best trial found")
                 return False
@@ -778,7 +745,7 @@ class SystemtenderWorker:
     # can pause for minutes, so a workload-bound signal would make the
     # "alive" window as slow as the slowest phase. This thread beats on
     # a fixed short interval into the tender's OWN state row — one tiny
-    # UPDATE per beat, its own throwaway connection, no optuna study
+    # UPDATE per beat, its own throwaway connection, never the ledger's
     # access, no coordination tables, no causal. The controller reads
     # the row's age (window = multiplier x the declared interval) and
     # refuses to deliver a wish into a house whose beat went quiet.
@@ -899,20 +866,12 @@ class SystemtenderWorker:
 
     def _check_shutdown_requested(self) -> bool:
         try:
-            from sqlalchemy import text
-            query = "SELECT shutdown_requested FROM systemtender_state LIMIT 1;"
-            with self._unwrap_storage_engine(self.study).connect() as conn:
-                result = conn.execute(text(query))
-
-            row = result.fetchone()
-            if row and row[0]:
-                logger.info(f"Shutdown flag is set for systemtender {self.systemtender_uuid}")
+            if self.ledger.stop_requested():
+                logger.info(f"Stop flag is set for systemtender {self.systemtender_uuid}")
                 return True
-
             return False
-
         except Exception as e:
-            logger.warning(f"Failed to check shutdown flag: {e}")
+            logger.warning(f"Failed to check stop flag: {e}")
             return False
 
     # ─── Wish serving (steer mode) ──────────────────────────────────────
@@ -926,52 +885,16 @@ class SystemtenderWorker:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
-    @staticmethod
-    def _unwrap_storage_engine(study):
-        """The raw RDB engine under optuna's storage wrappers.
-
-        optuna wraps RDBStorage in _CachedStorage, which delegates
-        everything EXCEPT exposes .engine — the wish pulse's SQL (the
-        assignment row, same archive DB as the shutdown flag) needs the
-        engine. Unwrap one wrapper layer; a storage with neither engine
-        nor _backend raises loudly (silence here strands wishes).
-        """
-        storage = study._storage
-        backend = getattr(storage, '_backend', None)
-        if backend is not None:
-            storage = backend
-        engine = getattr(storage, 'engine', None)
-        if engine is None:
-            raise RuntimeError(
-                f"no RDB engine reachable under storage "
-                f"{type(study._storage).__name__} — cannot read or "
-                f"clear the wish assignment row")
-        return engine
-
     def _check_wish_assignment(self) -> None:
-        """Read the wish assignment row (same archive DB as the shutdown
+        """Read the wish assignment row (same archive DB as the stop
         flag). Adopt on appearance, release on removal, every trial."""
         try:
-            from sqlalchemy import text
-            with self._unwrap_storage_engine(self.study).connect() as conn:
-                conn.execute(text(
-                    "CREATE TABLE IF NOT EXISTS wish_assignments ("
-                    "wish_id TEXT PRIMARY KEY, "
-                    "assigned_tsz DOUBLE PRECISION NOT NULL)"
-                ))
-                conn.execute(text(
-                    "ALTER TABLE wish_assignments "
-                    "ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'sender'"
-                ))
-                row = conn.execute(text(
-                    "SELECT wish_id, COALESCE(role, 'sender') FROM wish_assignments "
-                    "ORDER BY assigned_tsz DESC LIMIT 1"
-                )).fetchone()
+            assignment = self.ledger.wish_latest()
         except Exception as e:
             logger.warning(f"Wish assignment check failed: {e}")
             return
 
-        assigned, role = (row[0], row[1]) if row else (None, None)
+        assigned, role = assignment if assignment else (None, None)
         if assigned and (self._wish is None or self._wish.get('wish_id') != assigned):
             self._adopt_wish(assigned, role or 'sender')
         elif not assigned and self._wish is not None:
@@ -1142,13 +1065,7 @@ class SystemtenderWorker:
             # the row must go too, or the pulse's adopt-on-appearance
             # would re-adopt the corpse on the next boundary.
             try:
-                from sqlalchemy import text
-                with self._unwrap_storage_engine(self.study).connect() as conn:
-                    conn.execute(
-                        text("DELETE FROM wish_assignments WHERE wish_id = :wid"),
-                        {"wid": self._wish['wish_id']},
-                    )
-                    conn.commit()
+                self.ledger.wish_remove(self._wish['wish_id'])
             except Exception as e:
                 logger.warning(
                     f"Wish assignment removal failed for "
@@ -1159,8 +1076,8 @@ class SystemtenderWorker:
         import wmill
         state = {
             'systemtender_id': self.systemtender_id,
-            'total_trials': len(self.study.trials),
-            'study_name': self.study.study_name,
+            'total_trials': self.ledger.count(),
+            'study_name': f"{self.systemtender_id}_study",
             'status': 'running'
         }
 
@@ -1200,10 +1117,7 @@ class SystemtenderWorker:
                         logger.info("Rollback completed with after.action=stop, halting trials")
                         break
 
-                trial = self._retry_op(
-                    lambda: self.study.ask(),
-                    f"study.ask"
-                )
+                trial = TrialRef(self.ledger, self.ledger.begin())
                 logger.info(f"Trial {trial.number} started")
 
                 trial_start_time = time.time()
@@ -1244,6 +1158,18 @@ class SystemtenderWorker:
                         pass
                     detection_mode = decision['mode']
 
+                    # The classification, written once — readers bucket
+                    # by kind, never by string-matching attr literals.
+                    self.ledger.set_kind(trial.number, classify(
+                        detection_mode,
+                        decision.get('impulse_phase'),
+                        self._probe_coordinator.get_state()))
+                    # The why, as evidence: everything the coordinator
+                    # returned for this trial (params ride separately).
+                    trial.set_user_attr('decision', json.dumps(
+                        {k: v for k, v in decision.items() if k != 'params'},
+                        sort_keys=True))
+
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
                     if self._wish:
@@ -1278,8 +1204,8 @@ class SystemtenderWorker:
                             f"from coordinator — FAILing"
                         )
                         self._retry_op(
-                            lambda: self.study.tell(trial, state=TrialState.FAIL),
-                            f"study.tell FAIL no-coordinator-params (trial {trial.number})"
+                            lambda: self.ledger.fail(trial.number, 'no coordinator params'),
+                            f"ledger.fail no-coordinator-params (trial {trial.number})"
                         )
                         continue
 
@@ -1303,7 +1229,7 @@ class SystemtenderWorker:
                             trial.set_user_attr('guardrails', json.dumps(guardrail_readings))
 
                     # Collect observation signals for coupling detection.
-                    # These are NOT objectives — not fed to optuna.
+                    # These are NOT objectives — recorded, never judged.
                     # Stored as trial user_attrs for the observer to read.
                     observations_config = self.config.get('observations', [])
                     if observations_config:
@@ -1319,8 +1245,8 @@ class SystemtenderWorker:
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
                         self._retry_op(
-                            lambda: self.study.tell(trial, state=TrialState.FAIL),
-                            f"study.tell FAIL (trial {trial.number})"
+                            lambda: self.ledger.fail(trial.number, 'guardrail refusal'),
+                            f"ledger.fail guardrail-refusal (trial {trial.number})"
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
@@ -1340,7 +1266,8 @@ class SystemtenderWorker:
                         if self._last_metric_noise:
                             trial.set_user_attr('metric_noise', json.dumps(self._last_metric_noise))
 
-                        # Stash effectuation params BEFORE study.tell — trial is frozen after tell
+                        # Stash effectuation params with the trial — the
+                        # settings the coordinator shaped for it.
                         trial.set_user_attr('effectuation_params', json.dumps(params))
                         self._publish_standing_params(params)
 
@@ -1385,8 +1312,8 @@ class SystemtenderWorker:
                                 )
 
                         self._retry_op(
-                            lambda: self.study.tell(trial, values),
-                            f"study.tell (trial {trial.number})"
+                            lambda: self.ledger.complete(trial.number, values[0]),
+                            f"ledger.complete (trial {trial.number})"
                         )
 
                         trial_duration = time.time() - trial_start_time
@@ -1401,7 +1328,8 @@ class SystemtenderWorker:
                         self.metrics.observe_trial_duration(trial_duration)
                         self.metrics.inc_effectuation('success')
 
-                        if self.study.best_trials and self.study.best_trials[0].number == trial.number:
+                        best = self.ledger.best_trial(minimize=self._objective_minimizes())
+                        if best and best['number'] == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         self._handle_successful_trial(params)
@@ -1410,19 +1338,17 @@ class SystemtenderWorker:
                     if trial_count % 5 == 0:
                         self._heartbeat_interference()
                         self._update_state()
-                        self.metrics.set_total_trials(len(self.study.trials))
+                        self.metrics.set_total_trials(self.ledger.count())
                         self.metrics.push()
 
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
                     try:
-                        trial.set_user_attr('error', f"{type(e).__name__}: {str(e)[:500]}")
-                    except Exception:
-                        pass
-                    try:
                         self._retry_op(
-                            lambda: self.study.tell(trial, state=TrialState.FAIL),
-                            f"study.tell FAIL recovery (trial {trial.number})"
+                            lambda: self.ledger.fail(
+                                trial.number,
+                                f"{type(e).__name__}: {str(e)[:500]}"),
+                            f"ledger.fail recovery (trial {trial.number})"
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED")
                         # AIMD backoff ONLY from receiver_violated signal, never from sender's own failure
@@ -1443,14 +1369,11 @@ class SystemtenderWorker:
             self.metrics.push()
 
         self._update_state()
-        logger.info(f"SystemtenderWorker {self.worker_id} completed {len(self.study.trials)} trials")
+        logger.info(f"SystemtenderWorker {self.worker_id} completed {self.ledger.count()} trials")
 
-        if self.study.best_trials:
-            logger.info(f"Found {len(self.study.best_trials)} Pareto-optimal trials")
-            for i, trial in enumerate(self.study.best_trials[:3]):
-                logger.info(f"  Trial {i+1}: #{trial.number}, values={trial.values}, params={trial.params}")
-            if len(self.study.best_trials) > 3:
-                logger.info(f"  ... and {len(self.study.best_trials) - 3} more")
+        best = self.ledger.best_trial(minimize=self._objective_minimizes())
+        if best:
+            logger.info(f"Best trial: #{best['number']}, value={best['value']}, params={best['params']}")
 
 
 def main(config: Dict[str, Any], systemtender_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
@@ -1466,7 +1389,8 @@ def main(config: Dict[str, Any], systemtender_id: str = None, run_id: int = None
         'systemtender_id': worker.systemtender_id,
         'run_id': run_id,
         'target_id': target_id,
-        'total_trials': len(worker.study.trials),
-        'pareto_optimal_trials': len(worker.study.best_trials),
+        'total_trials': worker.ledger.count(),
+        'best_trial': 1 if worker.ledger.best_trial(
+            minimize=worker._objective_minimizes()) else 0,
         'status': 'completed'
     }

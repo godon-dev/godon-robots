@@ -22,7 +22,6 @@ import json
 import sys
 import types
 from unittest.mock import MagicMock, patch
-from optuna.trial import TrialState
 
 otel_mock = types.ModuleType('f.systemtender.shared.otel_logging')
 otel_mock.get_logger = lambda name: type('Logger', (), {
@@ -65,13 +64,11 @@ def _greenhouse_settings():
     }
 
 
-def _make_trial(state=1, user_attrs=None, flat_params=None):
-    """Create a mock trial. state defaults to 1 (TrialState.COMPLETE)."""
-    trial = MagicMock()
-    trial.state = state
-    trial.user_attrs = user_attrs or {}
-    trial.params = flat_params or {}
-    return trial
+def _make_trial(state='COMPLETE', user_attrs=None, flat_params=None):
+    """A ledger record, as the worker's boot replays consume them."""
+    return {'state': state, 'attrs': user_attrs or {},
+            'params': flat_params or {}, 'values': [1.0], 'number': 0,
+            'kind': 'hold', 'value': 1.0}
 
 
 def _make_worker_with_trials(trials):
@@ -86,14 +83,16 @@ def _make_worker_with_trials(trials):
         'reconnaissance': {'type': 'prometheus'},
         'interference_detection': {'mode': 'active'},
     }
-    study = MagicMock()
-    study.trials = list(trials)
-    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=study), \
+    ledger = MagicMock()
+    ledger.trials.return_value = list(trials)
+    ledger.count.return_value = len(trials)
+    ledger.best_trial.return_value = None
+    with patch.object(SystemtenderWorker, '_init_ledger',
+                      lambda self: setattr(self, 'ledger', ledger)), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_register_interference_systemtender'), \
          patch('engine.systemtender_worker.load_strain', return_value=MagicMock()):
         worker = SystemtenderWorker(config)
-    worker.study = study
     return worker
 
 

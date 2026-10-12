@@ -55,7 +55,7 @@ def _worker_with_ordered_init():
     mocked, capturing the init-time call order of the boot park and the
     room announcement."""
     order = []
-    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=MagicMock()), \
+    with patch.object(SystemtenderWorker, '_init_ledger', lambda self: setattr(self, 'ledger', MagicMock())), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_compute_neutral_params',
                       return_value={'param_0': 50.0}), \
@@ -94,7 +94,7 @@ def test_pure_optimizer_skips_boot_park():
     boot park is a no-op - no dials moved on the room's behalf."""
     config = _config()
     del config['interference_detection']
-    with patch.object(SystemtenderWorker, '_load_or_create_study', return_value=MagicMock()), \
+    with patch.object(SystemtenderWorker, '_init_ledger', lambda self: setattr(self, 'ledger', MagicMock())), \
          patch.object(SystemtenderWorker, '_update_state'), \
          patch.object(SystemtenderWorker, '_execute_trial') as trial:
         worker = SystemtenderWorker(config)
