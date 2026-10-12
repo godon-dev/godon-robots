@@ -910,7 +910,17 @@ class SystemtenderWorker:
         if assigned and (self._wish is None or self._wish.get('wish_id') != assigned):
             self._adopt_wish(assigned, role or 'sender')
         elif not assigned and self._wish is not None:
-            self._release_wish()
+            if self._seek_driver is not None:
+                # A vanished assignment mid-seek (the controller closed
+                # the wish) still comes home: abort between trials and
+                # write the return NOW, while the wish is still named —
+                # an orphaned driver would write its return under
+                # 'unknown' at loop end, losing the wish's id. The
+                # finish releases the wish itself.
+                self._seek_driver.abort()
+                self._finish_seek()
+            else:
+                self._release_wish()
 
     def _fetch_wish_plan(self, wish_id: str):
         """GET the wish's page from causal's book: status, instruction,
