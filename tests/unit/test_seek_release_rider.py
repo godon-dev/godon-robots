@@ -32,10 +32,10 @@ sys.modules['f.systemtender.engine.strain_loader'].load_strain = MagicMock(retur
 from engine.systemtender_worker import SystemtenderWorker
 
 SEEK_PAGE = {
-    'species': 'seek',
+    'type': 'seek',
     'instruction': 'seek',
     'seek': {
-        'species': 'find_best',
+        'form': 'find_best',
         'region': {'param_0': [0.0, 100.0, False]},
         'criterion': {'outcome': 'room/objective_1', 'direction': 'maximize'},
         'budget': 50,

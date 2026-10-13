@@ -942,7 +942,7 @@ class SystemtenderWorker:
         plan = self._fetch_wish_plan(wish_id)
         if not plan:
             return
-        if plan.get('species') == 'seek':
+        if plan.get('type') == 'seek':
             # The seek wish: a commissioned walk, not a hold. Its shape
             # is parsed at the door — a refused plan never binds and
             # never half-runs.
@@ -1001,7 +1001,7 @@ class SystemtenderWorker:
         try:
             seek_plan = parse_seek_plan({
                 'wish_id': wish_id,
-                'species': body.get('species') or 'find_best',
+                'form': body.get('form'),
                 'region': body.get('region') or {},
                 'criterion': body.get('criterion'),
                 'budget': body.get('budget'),
@@ -1022,7 +1022,7 @@ class SystemtenderWorker:
         }
         self._seek_driver = SeekDriver(seek_plan, region_policy(seek_plan.region))
         logger.info(
-            f"Wish {wish_id} adopted as SEEK: species={seek_plan.species}, "
+            f"Wish {wish_id} adopted as SEEK: form={seek_plan.form}, "
             f"dials={sorted(seek_plan.region)}, budget={seek_plan.budget}, "
             f"candidates={seek_plan.candidates}")
 

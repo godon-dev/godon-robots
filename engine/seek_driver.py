@@ -130,7 +130,7 @@ class SeekDriver:
                 if ended:
                     return None
             dial = self._dials[self._dial_idx]
-            if self._plan.species == FIND_BEST and self._wallet.exhausted:
+            if self._plan.form == FIND_BEST and self._wallet.exhausted:
                 self._finish(STOP_BUDGET)
                 return None
             level = self._policy(dial, self._measured.get(dial, []))
@@ -175,7 +175,7 @@ class SeekDriver:
     @property
     def criterion_outcome(self) -> Optional[str]:
         """The declared compass's outcome name; None for cover_now."""
-        if self._plan.species == COVER_NOW or not self._plan.criterion:
+        if self._plan.form == COVER_NOW or not self._plan.criterion:
             return None
         return self._plan.criterion.get('outcome')
 
@@ -185,7 +185,7 @@ class SeekDriver:
             raise RuntimeError('result() before the seek completed')
         best = rank(self._dart_findings + self._pass_findings,
                     {'direction': self._direction}) \
-            if self._plan.species == FIND_BEST else None
+            if self._plan.form == FIND_BEST else None
         return build_return(best, self._wallet,
                             self._stop_reason or STOP_CONVERGED)
 
@@ -201,7 +201,7 @@ class SeekDriver:
         return best[0]
 
     def _step_baseline(self, dial: str) -> None:
-        if self._plan.species == COVER_NOW:
+        if self._plan.form == COVER_NOW:
             return  # no compass declared — nothing to step by
         level = self._best_level(dial)
         if level is not None:
@@ -209,7 +209,7 @@ class SeekDriver:
 
     def _end_of_round(self) -> bool:
         """Round seam: pay nothing, decide whether another round runs."""
-        if self._plan.species == COVER_NOW:
+        if self._plan.form == COVER_NOW:
             self._finish(STOP_REGION)
             return True
         if self._last_baseline is not None and \

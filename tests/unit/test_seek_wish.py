@@ -35,7 +35,7 @@ from engine.seek_wish import (
 def base_plan(**over):
     plan = {
         'wish_id': 'sw-1',
-        'species': FIND_BEST,
+        'form': FIND_BEST,
         'region': {
             'dial_a': (0.0, 100.0, False),
             'dial_b': (1, 8, True),
@@ -82,9 +82,14 @@ class TestAdmission:
             criterion={'outcome': 'x', 'direction': 'minimize'}))
         assert plan.criterion['direction'] == MINIMIZE
 
-    def test_unknown_species_refuses(self):
+    def test_missing_form_refuses_no_omission(self):
+        with pytest.raises(SeekRefused) as exc:
+            parse_seek_plan(base_plan(form=None))
+        assert exc.value.reason == 'undeclared_form'
+
+    def test_unknown_form_refuses(self):
         with pytest.raises(SeekRefused):
-            parse_seek_plan(base_plan(species='wander'))
+            parse_seek_plan(base_plan(form='wander'))
 
     def test_empty_range_refuses_named(self):
         with pytest.raises(SeekRefused) as exc:
@@ -96,7 +101,7 @@ class TestAdmission:
     def test_cover_now_admits_without_search_fields(self):
         plan = parse_seek_plan({
             'wish_id': 'sw-2',
-            'species': COVER_NOW,
+            'form': COVER_NOW,
             'region': {'dial_a': (0.0, 100.0, False)},
         })
         assert plan.candidates == 0

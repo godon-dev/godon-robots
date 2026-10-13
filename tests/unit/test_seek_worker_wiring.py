@@ -49,10 +49,10 @@ def _config():
 
 
 SEEK_PAGE = {
-    'species': 'seek',
+    'type': 'seek',
     'instruction': 'seek',
     'seek': {
-        'species': 'find_best',
+        'form': 'find_best',
         'region': {
             'param_0': (0.0, 100.0, False),
         },

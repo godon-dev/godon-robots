@@ -1,6 +1,6 @@
 """The seek wish — declared intent that overrides the walk's priorities.
 
-Two species, one form (design §III/§XIV): cover_now walks a declared
+Two forms, one grammar (design §III/§XIV): cover_now walks a declared
 region first; find_best searches it under a budget and RETURNS the best
 it found. This module holds the pure machinery — plan validation, the
 wallet, the launch dice, ranking, and the return. The worker drives it:
@@ -58,15 +58,17 @@ class SeekPlan:
     """The admitted shape of a seek wish (design §XIV)."""
 
     wish_id: str
-    species: str
+    form: str
     region: Dict[str, Tuple[float, float, bool]]  # name -> (lo, hi, is_int)
     criterion: Optional[Dict[str, str]] = None     # find_best: outcome + direction
     budget: int = 0                                # feelers; 0 = unbounded (cover_now)
     candidates: int = 0                            # launch dice; declared-only
 
     def validate(self) -> None:
-        if self.species not in SPECIES:
-            raise SeekRefused('unknown_species', self.species)
+        if self.form is None:
+            raise SeekRefused('undeclared_form', 'the walk speaks its form (no omission)')
+        if self.form not in SPECIES:
+            raise SeekRefused('unknown_form', self.form)
         if not self.region:
             raise SeekRefused('empty_region')
         for name, (lo, hi, is_int) in self.region.items():
@@ -74,7 +76,7 @@ class SeekPlan:
                 raise SeekRefused('empty_range', name)
             if is_int and (int(lo) != lo or int(hi) != hi):
                 raise SeekRefused('non_integer_range', name)
-        if self.species == FIND_BEST:
+        if self.form == FIND_BEST:
             if not self.criterion or self.criterion.get('outcome') is None:
                 raise SeekRefused('undeclared_criterion')
             # The estate's objectives speak maximize/minimize; the
@@ -105,7 +107,7 @@ def parse_seek_plan(plan: Dict[str, Any]) -> SeekPlan:
     criterion = dict(plan.get('criterion')) if plan.get('criterion') else None
     parsed = SeekPlan(
         wish_id=str(plan['wish_id']),
-        species=plan['species'],
+        form=plan['form'],
         region=region,
         criterion=criterion,
         budget=int(plan.get('budget') or 0),
