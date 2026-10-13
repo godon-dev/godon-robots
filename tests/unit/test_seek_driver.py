@@ -38,7 +38,7 @@ from engine.seek_wish import (
 def find_plan(budget=100, candidates=2):
     return parse_seek_plan({
         'wish_id': 'sw-t',
-        'species': FIND_BEST,
+        'form': FIND_BEST,
         'region': {'a': (0.0, 10.0, False), 'b': (0.0, 10.0, False)},
         'criterion': {'outcome': 'room/obj', 'direction': MAXIMIZE},
         'budget': budget,
@@ -117,7 +117,7 @@ class TestPasses:
 
     def test_minimize_direction_picks_the_lowest(self):
         plan = parse_seek_plan({
-            'wish_id': 'sw-t', 'species': FIND_BEST,
+            'wish_id': 'sw-t', 'form': FIND_BEST,
             'region': {'a': (0.0, 10.0, False), 'b': (0.0, 10.0, False)},
             'criterion': {'outcome': 'r', 'direction': MINIMIZE},
             'budget': 100, 'candidates': 0,
@@ -168,7 +168,7 @@ class TestRounds:
 class TestCoverNow:
     def test_cover_now_walks_once_and_returns_no_finding(self):
         plan = parse_seek_plan({
-            'wish_id': 'sw-c', 'species': COVER_NOW,
+            'wish_id': 'sw-c', 'form': COVER_NOW,
             'region': {'a': (0.0, 4.0, False), 'b': (0.0, 4.0, False)},
         })
         driver = SeekDriver(plan, queue_policy({'a': [2.0], 'b': [3.0]}))
@@ -182,7 +182,7 @@ class TestCoverNow:
 
     def test_cover_now_never_steps_a_baseline(self):
         plan = parse_seek_plan({
-            'wish_id': 'sw-c', 'species': COVER_NOW,
+            'wish_id': 'sw-c', 'form': COVER_NOW,
             'region': {'a': (0.0, 4.0, False), 'b': (0.0, 4.0, False)},
         })
         driver = SeekDriver(plan, queue_policy({'a': [2.0], 'b': [3.0]}))
