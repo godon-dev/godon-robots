@@ -74,10 +74,12 @@ def test_unassigned_mid_seek_writes_return_under_its_own_id():
         worker._check_wish_assignment()
     assert worker._seek_driver is not None
 
-    # One dart measured.
-    dart = worker._seek_decision()
-    assert dart is not None and dart.get('seek_dart') is True
+    # One dart commissioned and measured.
+    worker._serve_seek_step()
+    assert worker._seek_open is not None and worker._seek_open.get('dart')
+    worker._seek_driver.wallet_pay()
     worker._seek_driver.observe(0.7, 0.02)
+    worker._seek_open = None
 
     # The controller closes the wish: the assignment row vanishes.
     worker.ledger.wish_latest.return_value = None

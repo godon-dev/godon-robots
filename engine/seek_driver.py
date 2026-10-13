@@ -54,7 +54,10 @@ STOP_STOPPED = 'stopped'
 
 
 class SeekDriver:
-    """Per-trial state machine. step() before the trial, observe() after."""
+    """Per-trial state machine. step() issues a commission, observe()
+    closes it; the WORKER pays the wallet once per trial (every trial
+    the tender runs while the seek holds it is the seek's spend —
+    darts and protocol trials alike, one payer, no double count)."""
 
     def __init__(self, plan: SeekPlan, policy: Policy):
         self._plan = plan
@@ -71,7 +74,7 @@ class SeekDriver:
         self._dial_readings: Dict[str, List[Tuple[Any, float, float]]] = {}
         self._dials: List[str] = list(plan.region.keys())
         self._dial_idx = 0
-        self._pending: Optional[Dict[str, Any]] = None  # the issued step
+        self._pending: Optional[Dict[str, Any]] = None  # the issued commission
         self._phase = DARTS if self._darts else PASSES
         self._rounds_done = 0
         self._stop_reason: Optional[str] = None
@@ -79,12 +82,30 @@ class SeekDriver:
 
     # ─── the loop ───────────────────────────────────────────────────
 
-    def step(self) -> Optional[Dict[str, Any]]:
-        """The next trial's decision, or None when the seek is complete.
+    @property
+    def has_open_commission(self) -> bool:
+        """A step was issued and its observe is still owed — the worker
+        must not ask for the next step until the commissioned probe has
+        actually been measured."""
+        return self._pending is not None
 
-        The wallet is checked HERE — between trials, never mid-step. A
-        refused start (no money for even the darts) ends before any
-        trial: the door already guaranteed candidates fit the budget.
+    @property
+    def wallet_exhausted(self) -> bool:
+        return self._wallet.exhausted
+
+    def wallet_pay(self, units: int = 1) -> None:
+        """The worker pays here, once per trial — the single payer."""
+        self._wallet.pay(units)
+
+    def step(self) -> Optional[Dict[str, Any]]:
+        """The next commission, or None when the seek is complete.
+
+        A DART is a direct joint push (the worker executes it itself —
+        unattributable by design, never protocol). A PASS is a
+        COMMISSION: the worker hands (dial, level) to the coordinator's
+        probe override and lets the standing protocol execute it —
+        full probe shape, observation publishing, curve banking. The
+        seek pays walk prices and the map banks the ground.
         """
         if self._phase == DONE:
             return None
@@ -99,7 +120,6 @@ class SeekDriver:
                 return None
             else:
                 params = self._darts.pop(0)
-                self._wallet.pay()
                 self._pending = {'phase': DARTS, 'mode': 'push',
                                  'params': params, 'dart': True}
                 return dict(self._pending)
@@ -120,27 +140,30 @@ class SeekDriver:
                 self._step_baseline(dial)
                 self._dial_idx += 1
                 continue
-            params = dict(self._baseline)
-            params[dial] = level
             self._measured.setdefault(dial, []).append(level)
-            self._wallet.pay() if self._plan.species == FIND_BEST else None
-            self._pending = {'phase': PASSES, 'mode': 'push',
-                             'params': params, 'probe_dial': dial,
-                             'probe_level': level}
+            self._pending = {'phase': PASSES, 'mode': 'commission',
+                             'probe_dial': dial, 'probe_level': level,
+                             'baseline': dict(self._baseline)}
             return dict(self._pending)
         return None
 
     def observe(self, reading: float, bars: float = 0.0) -> None:
-        """Hand the measured criterion reading for the issued step back."""
+        """Hand the measured criterion reading for the open commission
+        back: a dart ranked (joint params, unattributable), or a pass
+        level measured (the commissioned dial at its level, over the
+        stepped baseline)."""
         if self._pending is None:
             raise RuntimeError('observe() without an issued step')
-        params = self._pending['params']
-        finding = Finding(params=dict(params), reading=reading, bars=bars)
         if self._pending['phase'] == DARTS:
-            self._dart_findings.append(finding)
+            self._dart_findings.append(Finding(
+                params=dict(self._pending['params']),
+                reading=reading, bars=bars))
         else:
-            self._pass_findings.append(finding)
             dial = self._pending['probe_dial']
+            params = dict(self._pending.get('baseline') or {})
+            params[dial] = self._pending['probe_level']
+            self._pass_findings.append(Finding(
+                params=params, reading=reading, bars=bars))
             self._dial_readings.setdefault(dial, []).append(
                 (self._pending['probe_level'], reading, bars))
         self._pending = None
