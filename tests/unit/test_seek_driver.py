@@ -91,8 +91,8 @@ class TestDarts:
     def test_darts_rank_into_the_return_when_budget_ends(self):
         plan = find_plan(budget=2, candidates=2)
         driver = SeekDriver(plan, queue_policy({'a': [], 'b': []}))
-        driver.step(); driver.observe(0.4)
-        driver.step(); driver.observe(0.9)
+        driver.step(); driver.wallet_pay(); driver.observe(0.4)
+        driver.step(); driver.wallet_pay(); driver.observe(0.9)
         assert driver.step() is None  # wallet empty at the seam
         result = driver.result()
         assert result['verdict'] == RETURNED
@@ -108,13 +108,12 @@ class TestPasses:
         driver = SeekDriver(plan, policy)
         driver.step(); driver.observe(0.5)   # a=5.0
         driver.step(); driver.observe(0.8)   # a=7.0  <- best for a
-        # a prices out INSIDE the next step: the same step returns b's
-        # first probe, pushed over the stepped baseline.
+        # a prices out INSIDE the next step: the same step commissions
+        # b's first probe, with the stepped baseline riding along.
         b_probe = driver.step()
         assert b_probe is not None
         assert b_probe['probe_dial'] == 'b'
-        assert b_probe['params']['a'] == 7.0  # stepped
-        assert b_probe['params']['b'] == 1.0
+        assert b_probe['baseline'] == {'a': 7.0}  # stepped
 
     def test_minimize_direction_picks_the_lowest(self):
         plan = parse_seek_plan({
@@ -139,9 +138,9 @@ class TestPasses:
         plan = find_plan(budget=3, candidates=0)
         policy = queue_policy({'a': [1.0, 2.0, 3.0], 'b': [9.0]})
         driver = SeekDriver(plan, policy)
-        driver.step(); driver.observe(0.1)
-        driver.step(); driver.observe(0.2)
-        driver.step(); driver.observe(0.3)    # wallet now empty
+        driver.step(); driver.wallet_pay(); driver.observe(0.1)
+        driver.step(); driver.wallet_pay(); driver.observe(0.2)
+        driver.step(); driver.wallet_pay(); driver.observe(0.3)  # wallet now empty
         assert driver.step() is None          # refused at the seam
         result = driver.result()
         assert result['stop_reason'] == STOP_BUDGET
@@ -190,7 +189,7 @@ class TestCoverNow:
         driver.step(); driver.observe(0.9)
         b = driver.step()
         assert b is not None
-        assert 'a' not in b['params']  # no compass -> no stepping
+        assert 'a' not in (b.get('baseline') or {})  # no compass -> no stepping
 
 
 class TestAbortAndContract:

@@ -37,11 +37,11 @@ from f.systemtender.engine.strain_loader import load_strain
 
 try:
     from f.systemtender.engine.seek_wish import SeekRefused, parse_seek_plan
-    from f.systemtender.engine.seek_driver import SeekDriver
+    from f.systemtender.engine.seek_driver import SeekDriver, STOP_BUDGET
     from f.systemtender.engine.seek_policy import region_policy
 except ImportError:  # test envs import from the plain package
     from engine.seek_wish import SeekRefused, parse_seek_plan
-    from engine.seek_driver import SeekDriver
+    from engine.seek_driver import SeekDriver, STOP_BUDGET
     from engine.seek_policy import region_policy
 
 from f.systemtender.shared.otel_logging import get_logger
@@ -174,9 +174,13 @@ class SystemtenderWorker:
         # Wish serving (steer mode): adopted at the pulse, held at the
         # planned value, released to neutral. None = no wish bound.
         self._wish = None
-        # The seek wish's driver (one step per trial while a seek
-        # holds this tender); None whenever no seek is bound.
+        # The seek wish's driver (one commission per trial-block while
+        # a seek holds this tender); None whenever no seek is bound.
         self._seek_driver = None
+        # The open commission: a dart (direct joint push) or a pass
+        # (handed to the coordinator's probe override). None between
+        # commissions.
+        self._seek_open = None
         self._last_metric_noise = {}
 
         # The first park BEFORE the room announcement: the bench boots at
@@ -1022,28 +1026,36 @@ class SystemtenderWorker:
             f"dials={sorted(seek_plan.region)}, budget={seek_plan.budget}, "
             f"candidates={seek_plan.candidates}")
 
-    def _seek_decision(self) -> Dict[str, Any]:
-        """One driver step per trial — the seek's whole loop rides the
-        ordinary trial rails. A completed seek writes its return, parks
-        at neutral, and releases the wish: undeclared states revert;
-        holding the winner is a declared steerwish through freshly
-        walked ground, never automatic."""
+    def _serve_seek_step(self) -> None:
+        """One commission at a time. Darts execute directly (joint
+        pushes — unattributable by design, never protocol). Passes are
+        handed to the coordinator's probe override and the STANDING
+        PROTOCOL executes them — full probe shape, observation
+        publishing, curve banking. The seek pays walk prices; the map
+        banks the ground; local and coupled emerge from the same probe
+        window the walk has always used."""
         driver = self._seek_driver
         if driver is None:
-            # An unbound seek (refused at the door): stillness, not search.
-            return {'mode': 'hold', 'params': self._compute_neutral_params() or {}}
-        step = driver.step()
-        if step is None:
+            return
+        if self._seek_open is None and driver.wallet_exhausted:
+            # A seam between commissions with no money left: come home
+            # (never mid-probe — the open commission finishes first).
+            driver.abort(STOP_BUDGET)
             self._finish_seek()
-            return {'mode': 'hold', 'params': self._compute_neutral_params() or {}}
-        decision = {'mode': 'push', 'params': step['params'],
-                    'seek_phase': step['phase']}
-        if step.get('dart'):
-            decision['seek_dart'] = True
+            return
+        if self._seek_open is not None:
+            return  # the open commission is still in flight
+        nxt = driver.step()
+        if nxt is None:
+            self._finish_seek()
+            return
+        if nxt.get('dart'):
+            self._seek_open = nxt
         else:
-            decision['probe_param'] = step.get('probe_dial')
-            decision['probe_level'] = step.get('probe_level')
-        return decision
+            coord = getattr(self, '_probe_coordinator', None)
+            if coord is not None and hasattr(coord, 'set_probe_override'):
+                coord.set_probe_override(nxt['probe_dial'], [nxt['probe_level']])
+            self._seek_open = nxt
 
     def _finish_seek(self) -> None:
         """Write the RETURN into the tender's own ledger (its DB, its
@@ -1074,6 +1086,7 @@ class SystemtenderWorker:
             f"spend={result.get('spend_count')}, "
             f"finding={result.get('finding')}")
         self._seek_driver = None
+        self._seek_open = None
         self._release_wish(delete_assignment=True)
 
     def _notify_wish_receiver(self, wish_id: str, receiver: str) -> None:
@@ -1260,15 +1273,28 @@ class SystemtenderWorker:
                     self._check_wish_assignment()
                     self._refresh_wish_status()
 
+                    # === The seek wish: commission or dart, THEN the
+                    # coordinator's own decision ===
+                    # Passes ride the standing probe protocol (they bank
+                    # as map ground); darts are direct joint pushes that
+                    # replace the decision for their single trial.
+                    if self._wish and self._wish.get('instruction') == 'seek':
+                        self._serve_seek_step()
+
                     # === Detection Coordinator ===
                     decision = self._probe_coordinator.decide_trial(trial)
-                    if (self._wish and self._wish.get('instruction') == 'seek'):
-                        # The seek outranks the walk for this tender's
-                        # trials: the driver names this trial's settings
-                        # (a dart, or a pass level over the stepped
-                        # baseline); the wallet and the dials stay the
-                        # driver's, the rails stay the loop's.
-                        decision = self._seek_decision()
+                    if self._seek_open is not None and self._seek_open.get('dart'):
+                        decision = {'mode': 'push',
+                                    'params': self._seek_open['params'],
+                                    'seek_dart': True}
+                    elif self._seek_open is not None and not self._seek_open.get('dart'):
+                        # The commissioned probe rides the protocol's own
+                        # decision; the seek's stepped baseline merges onto
+                        # the OTHER dials (the coordinator knows the probe
+                        # level — it does not know where the walk camped).
+                        baseline = self._seek_open.get('baseline') or {}
+                        decision['params'] = {**(decision.get('params') or {}),
+                                              **baseline}
                     elif (self._wish and self._wish.get('instruction') == 'hold'
                             and self._wish.get('param') is not None):
                         # The wish outranks the walk: hold the planned value.
@@ -1410,16 +1436,20 @@ class SystemtenderWorker:
                         trial.set_user_attr('effectuation_params', json.dumps(params))
                         self._publish_standing_params(params)
 
-                        # The seek's observe: hand this trial's criterion
-                        # reading (and its noise, when the window offered
-                        # one) to the driver — one dart ranked, or one pass
-                        # level measured. cover_now observes a 0.0 reading:
-                        # no compass declared, the walk itself is the point.
-                        if self._seek_driver is not None and self._wish \
-                                and self._wish.get('instruction') == 'seek':
+                        # The seek's pay and observe: every trial while
+                        # the seek holds this tender is its spend (one
+                        # payer, per trial — protocol overhead included).
+                        # The observe fires when the OPEN COMMISSION's
+                        # measurement lands: the dart trial itself, or
+                        # the protocol probe at the commissioned level —
+                        # protocol trials at other levels (pause windows,
+                        # settle blocks) pay but do not observe.
+                        if self._seek_driver is not None and self._seek_open is not None:
+                            self._seek_driver.wallet_pay()
+                            open_step = self._seek_open
                             outcome = self._seek_driver.criterion_outcome
                             if outcome is None:
-                                self._seek_driver.observe(0.0, 0.0)
+                                reading, noise = 0.0, 0.0
                             else:
                                 local = outcome.rsplit('/', 1)[-1]
                                 reading = metrics.get(local)
@@ -1428,11 +1458,18 @@ class SystemtenderWorker:
                                         f"Seek trial {trial.number}: criterion "
                                         f"{local!r} absent from metrics "
                                         f"{sorted(metrics)[:6]}")
-                                    self._seek_driver.observe(0.0, 0.0)
+                                    reading, noise = 0.0, 0.0
                                 else:
-                                    noise = (self._last_metric_noise or {}).get(local, 0.0)
-                                    self._seek_driver.observe(
-                                        float(reading), float(noise or 0.0))
+                                    noise = (self._last_metric_noise or {}).get(
+                                        local, 0.0) or 0.0
+                            landed = (
+                                open_step.get('dart')
+                                or (decision.get('probe_param') == open_step.get('probe_dial')
+                                    and decision.get('probe_level') == open_step.get('probe_level')))
+                            if landed:
+                                self._seek_driver.observe(
+                                    float(reading), float(noise))
+                                self._seek_open = None
 
                         # Publish this trial's own readings to the shared
                         # table whenever a protocol phase was in flight:

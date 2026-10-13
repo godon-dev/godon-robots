@@ -87,24 +87,45 @@ def test_seek_lifecycle_adopt_walk_return():
     assert worker._wish['instruction'] == 'seek'
     assert worker._seek_driver is not None
 
-    # Darts: joint pushes, one per decision, flagged for their own kind.
-    dart = worker._seek_decision()
-    assert dart['mode'] == 'push' and dart['seek_dart'] is True
-    assert 'param_0' in dart['params']
-    worker._seek_driver.observe(0.4, 0.02)
-    dart2 = worker._seek_decision()
-    assert dart2.get('seek_dart') is True
-    worker._seek_driver.observe(0.9, 0.02)
+    # The coordinator as a mock from the start: darts never touch it,
+    # so the only override call will be the first pass commission.
+    worker._probe_coordinator = MagicMock()
 
-    # Pass probes: levels over the (single-dial) region, no dart flag.
+    # Darts: the commissions open and the worker executes them
+    # directly — joint pushes, never protocol.
+    darts = 0
+    while worker._seek_open is None or worker._seek_open.get('dart'):
+        if worker._seek_open is None:
+            worker._serve_seek_step()
+            if worker._seek_open is None:
+                break
+        assert 'param_0' in worker._seek_open['params']
+        worker._seek_driver.wallet_pay()
+        worker._seek_driver.observe(0.4 + 0.5 * darts, 0.02)
+        worker._seek_open = None
+        darts += 1
+        worker._serve_seek_step() if worker._seek_open is None else None
+        if worker._seek_driver is None:
+            break
+    assert darts == 2
+
+    # Pass: the COORDINATOR's probe override is commissioned — the
+    # probe rides the standing protocol and banks as map ground.
+    assert worker._seek_open is not None and not worker._seek_open.get('dart')
+    ov = worker._probe_coordinator.set_probe_override.call_args
+    assert ov.args[0] == 'param_0' and ov.args[1] == [50.0]  # midpoint first
+
+    # Drive the commissions to completion (pay + observe each).
     passes = 0
     while worker._seek_driver is not None:
-        decision = worker._seek_decision()
-        if worker._seek_driver is None:
-            break  # the decision that finished the seek was a park
-        assert decision['mode'] == 'push'
-        assert 'seek_dart' not in decision
+        if worker._seek_open is None:
+            worker._serve_seek_step()
+        open_step = worker._seek_open
+        if open_step is None or worker._seek_driver is None:
+            break
+        worker._seek_driver.wallet_pay()
         worker._seek_driver.observe(0.5 + 0.001 * passes, 0.02)
+        worker._seek_open = None
         passes += 1
 
     assert passes > 0
@@ -115,7 +136,7 @@ def test_seek_lifecycle_adopt_walk_return():
         [c.args[1] for c in worker.ledger.state_put.call_args_list
          if c.args[0] == 'seek_return::sw-9'][0])
     assert payload['verdict'] == 'RETURNED'
-    assert payload['spend_count'] == 2 + passes
+    assert payload['spend_count'] == darts + passes
     assert payload['finding'] is not None
     assert releases, 'the wish must be released after the return'
 
@@ -135,13 +156,17 @@ def test_release_mid_seek_comes_home_returned():
     worker, releases = _seek_worker()
     with patch.object(worker, '_fetch_wish_plan', return_value=SEEK_PAGE):
         worker._adopt_wish('sw-mid', 'sender')
-    dart = worker._seek_decision()
-    worker._seek_driver.observe(0.7, 0.02)
-    assert dart is not None
 
-    release_page = {'species': 'seek', 'instruction': 'release'}
-    with patch.object(worker, '_fetch_wish_plan', return_value=release_page):
-        worker._refresh_wish_status()
+    # One dart commissioned and measured.
+    worker._serve_seek_step()
+    assert worker._seek_open is not None and worker._seek_open.get('dart')
+    worker._seek_driver.wallet_pay()
+    worker._seek_driver.observe(0.7, 0.02)
+    worker._seek_open = None
+
+    # The controller closes the wish: the assignment row vanishes.
+    worker.ledger.wish_latest.return_value = None
+    worker._check_wish_assignment()
 
     keys = [c.args[0] for c in worker.ledger.state_put.call_args_list]
     assert 'seek_return::sw-mid' in keys
