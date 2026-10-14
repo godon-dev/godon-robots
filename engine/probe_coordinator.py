@@ -140,6 +140,14 @@ class ProbeCoordinator:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
+        # Slice duty (rung 5): the map's named local-ground debt for
+        # THIS tender, memoized so per-trial polls (char_complete,
+        # demand publication) never hammer the notebook. None = not
+        # consulted or the consult went dark (never cached: a dark
+        # view is not an answer).
+        self._slice_debt_cache: Optional[List[Dict[str, Any]]] = None
+        self._slice_debt_at: Optional[float] = None
+
         # Quantum: the slice of probe cycles one systemtender holds the lease
         # before yielding to a walk-pending peer. Yield only under
         # contention (solo walkers run to completion, zero churn).
@@ -740,6 +748,13 @@ class ProbeCoordinator:
         bounds = self._param_bounds.get(probe['param_name'])
         if bounds:
             payload['param_range'] = bounds['upper'] - bounds['lower']
+        if probe.get('slice_anchor') is not None:
+            # The local-ground bank (rung 5): causal keys the resting
+            # spot from its own standing-params read, pinned at this
+            # anchor — the walk's own declaration of where it lives.
+            payload['slice_anchor'] = probe['slice_anchor']
+            if probe.get('slice_epoch') is not None:
+                payload['slice_epoch'] = probe['slice_epoch']
 
         timeout = self._causal_timeout()
         url = f"{self._causal_url}/characterize"
@@ -954,16 +969,24 @@ class ProbeCoordinator:
 
     # ── Probe override (precise remeasure) ────────────────────────────
 
-    def set_probe_override(self, param_name: str, levels) -> None:
+    def set_probe_override(self, param_name: str, levels,
+                           slice_anchor=None, slice_epoch=None) -> None:
         """Pin the next push blocks to one param at the given levels —
-        the wish's precise remeasure. The lease, push/pause windows and
-        characterize calls stay this coordinator's own machinery; only
-        the WHERE of the probe is pinned. Cleared when the levels are
-        exhausted (the coverage walk then resumes)."""
+        the wish's precise remeasure, and the instrument the slice
+        re-walk rides (rung 5): when slice_anchor is present the probe
+        banks as local ground at that resting spot, epoch-stamped. The
+        lease, push/pause windows and characterize calls stay this
+        coordinator's own machinery; only the WHERE of the probe is
+        pinned. Cleared when the levels are exhausted (the coverage
+        walk then resumes)."""
         self._probe_override = {
             'param_name': param_name,
             'levels': [float(l) for l in levels],
             'idx': 0,
+            'slice_anchor': (float(slice_anchor)
+                             if slice_anchor is not None else None),
+            'slice_epoch': (int(slice_epoch)
+                            if slice_epoch is not None else None),
         }
 
     def _override_next_probe(self) -> Optional[Dict[str, Any]]:
@@ -991,12 +1014,16 @@ class ProbeCoordinator:
         else:
             config[param_name] = level
 
-        return {
+        out = {
             'param_name': param_name,
             'param_idx': bounds['idx'],
             'level': level,
             'config': config,
         }
+        if ov.get('slice_anchor') is not None:
+            out['slice_anchor'] = ov['slice_anchor']
+            out['slice_epoch'] = ov.get('slice_epoch') or 0
+        return out
 
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
         """Advance the coverage walk: next param + level to push.
@@ -1027,6 +1054,137 @@ class ProbeCoordinator:
             'level': level,
             'config': config,
         }
+
+    # ── Slice duty (rung 5: standing duty's local ground) ────────────
+
+    # Consult memo lifetime. char_complete and demand publication poll
+    # per trial; the notebook deserves one GET per this window, not one
+    # per trial. Boundaries (the DONE-boundary consult) always re-ask.
+    SLICE_DEBT_TTL = 60.0
+    # One consult's fence batch: walk this many window levels, then
+    # re-consult — the window may have priced wider by then, and a
+    # stale batch must never outlive its own fence.
+    SLICE_WALK_BATCH = 8
+
+    def _slice_debt(self, force=False) -> Optional[List[Dict[str, Any]]]:
+        """The map's named local-ground debt for THIS tender.
+
+        Returns the debt list (possibly empty), or None when the
+        consult went dark — None is never cached and never walked on:
+        the park-and-retry discipline (a dark view is not an answer,
+        and guessing is the one sin the walk never commits). Debt
+        entries carry {param, anchor, baseline, window, epoch, reason,
+        levels, gaps}; reasons are 'unmeasured_operating_point' (no
+        patch at the current resting spot) and 'window_aging' (the
+        patch went stale under vigilance).
+        """
+        import time as _time
+        now = _time.monotonic()
+        if (not force
+                and self._slice_debt_at is not None
+                and now - self._slice_debt_at < self.SLICE_DEBT_TTL
+                and self._slice_debt_cache is not None):
+            return self._slice_debt_cache
+
+        import urllib.request
+        import json as _json
+        from urllib.parse import urlencode
+        from urllib.error import HTTPError
+        qs = urlencode({"group": self.group_id})
+        url = f"{self._causal_url}/slice-duty/{self.systemtender_id}?{qs}"
+        req = urllib.request.Request(url, method='GET')
+        try:
+            with urllib.request.urlopen(req, timeout=self._causal_timeout()) as resp:
+                body = _json.loads(resp.read())
+        except HTTPError as e:
+            if 400 <= e.code < 500:
+                # The notebook ANSWERED: this causal predates local
+                # ground (rolling upgrade) — no debt can exist. Parking
+                # a tender on an answered page would be the dark-view
+                # sin inverted.
+                logger.info(
+                    f"SLICE DUTY: notebook has no duty page ({e.code}) — no debt")
+                self._slice_debt_cache = []
+                self._slice_debt_at = _time.monotonic()
+                return self._slice_debt_cache
+            logger.warning(f"SLICE DUTY: consult dark ({e}) — parking the question")
+            return None
+        except Exception as e:
+            logger.warning(f"SLICE DUTY: consult dark ({e}) — parking the question")
+            return None
+        debt = list(body.get('debt', []))
+        self._slice_debt_cache = debt
+        self._slice_debt_at = now
+        return debt
+
+    def _slice_unmeasured_pending(self) -> bool:
+        """The bounded half of slice debt: patches that do not exist
+        yet. This alone extends walk-pending and holds the quiet-bench
+        lever — the tender stays while local ground is missing, and
+        leaves once it exists. Window aging deliberately does NOT gate
+        here: re-walking stale windows rides whatever lifetime the
+        room's activity gives (the aging-vs-lifetime edge is named in
+        the rung's PR for the holder's ruling)."""
+        debt = self._slice_debt()
+        if debt is None:
+            raise WalkViewUnavailable("slice-duty consult dark")
+        return any(d.get('reason') == 'unmeasured_operating_point' for d in debt)
+
+    def _slice_duty_probe(self) -> Optional[Dict[str, Any]]:
+        """The DONE-boundary consult: the map names its local-ground
+        debt, standing duty walks it before DONE may stand.
+
+        Placement stays here — the dumb stateless legs: midpoint of
+        the fattest unresolved in-window gap, unbanked levels only,
+        fenced to the param's own bounds, one batch per consult. The
+        walk itself is the ordinary override ride: same push/pause,
+        same settle-and-read, one dial moving in a window around its
+        held value. Returns None when the map names no debt this
+        boundary (or the named dials are unknown to this strain).
+        Raises WalkViewUnavailable on a dark consult.
+        """
+        debt = self._slice_debt(force=True)
+        if debt is None:
+            raise WalkViewUnavailable("slice-duty consult dark")
+        entry = next((e for e in debt
+                      if e.get('param') in self._param_bounds), None)
+        if entry is None:
+            return None
+        param = entry['param']
+        bounds = self._param_bounds[param]
+        lo_bound, hi_bound = bounds['lower'], bounds['upper']
+
+        measured = {round(float(l), 9) for l in entry.get('levels', [])}
+        gaps = [g for g in entry.get('gaps', [])
+                if g.get('unresolved')
+                and g.get('ignorance', float('inf')) > g.get('bars_sum', 0.0)]
+        gaps.sort(key=lambda g: (-g.get('ignorance', 0.0),
+                                 -(g['to_level'] - g['from_level'])))
+        levels: List[float] = []
+        for g in gaps:
+            mid = (g['from_level'] + g['to_level']) / 2.0
+            mid = min(max(mid, lo_bound), hi_bound)
+            if round(mid, 9) in measured:
+                continue
+            if any(abs(mid - l) < 1e-9 for l in levels):
+                continue
+            levels.append(mid)
+            if len(levels) >= self.SLICE_WALK_BATCH:
+                break
+        if not levels:
+            # The window is walked to priced-out: no debt this
+            # boundary answers for. The map will re-name it if it
+            # ages, or widen it if the edges price for it.
+            return None
+
+        self.set_probe_override(param, levels,
+                                slice_anchor=entry['anchor'],
+                                slice_epoch=entry.get('epoch') or 0)
+        logger.info(
+            f"SLICE DUTY: param={param} anchor={entry['anchor']} "
+            f"window={entry.get('window')} reason={entry.get('reason')} "
+            f"levels={len(levels)} epoch={entry.get('epoch') or 0}")
+        return self._override_next_probe()
 
     def _tell_char_study(self, param_name: str, result: Optional[dict]):
         """Record a completed probe: log the information score, check
@@ -1124,7 +1282,11 @@ class ProbeCoordinator:
             return False
         converged = getattr(self, '_converged_params', set())
         try:
-            return not walk.can_probe(set(converged))
+            if walk.can_probe(set(converged)):
+                return False
+            # Local ground outstanding: the tender stays (rung 5's
+            # bounded debt — the quiet-bench lever waits for patches).
+            return not self._slice_unmeasured_pending()
         except WalkViewUnavailable as e:
             # A slow notebook must not kill the tender (run 35224443449:
             # one >2s view read failed the whole worker job). Not
@@ -1264,11 +1426,15 @@ class ProbeCoordinator:
 
     def _walk_pending(self) -> bool:
         """Non-advancing check: can the walk still produce a probe for
-        unconverged params at the current refinement floor?"""
+        unconverged params at the current refinement floor — or does
+        the map still name unmeasured local ground (rung 5's bounded
+        debt: patches that do not exist yet)?"""
         if self._char_walk is None:
             return False
         try:
-            return bool(self._char_walk.can_probe(self._converged_params))
+            if self._char_walk.can_probe(self._converged_params):
+                return True
+            return self._slice_unmeasured_pending()
         except WalkViewUnavailable as e:
             # Dark view: stay engaged (True). Parking on a dark view
             # would falsely end the walk; the notebook is authoritative
@@ -1301,6 +1467,18 @@ class ProbeCoordinator:
                         f"skipping this trial boundary")
                     return self._idle_result()
             if probe is None:
+                # Standing duty's local ground (rung 5): before DONE
+                # may stand, the map's named slice debt gets its walk
+                # — the same push/pause machinery, one dial fenced to
+                # a window around its held value.
+                try:
+                    probe = self._slice_duty_probe()
+                except WalkViewUnavailable as e:
+                    logger.warning(
+                        f"SLICE DUTY: consult dark ({e}) — "
+                        f"skipping this trial boundary")
+                    return self._idle_result()
+            if probe is None:
                 self.state = self.DONE
                 return self._handle_done(trial)
             self._current_probe = probe
@@ -1320,7 +1498,7 @@ class ProbeCoordinator:
             self._pause_count = 0
 
         probe = self._current_probe
-        return {
+        out = {
             'mode': 'impulse',
             'params': dict(probe['config']),
             'impulse_phase': 'probe_push',
@@ -1329,6 +1507,11 @@ class ProbeCoordinator:
             'probe_level': probe['level'],
             'detection_trial': True,
         }
+        if probe and probe.get('slice_anchor') is not None:
+            # The fenced walk at the resting spot: the ledger's kind
+            # stamp and causal's local-ground bank both key on this.
+            out['slice_probe'] = True
+        return out
 
     # ── PROBE_PAUSE (sender) ─────────────────────────────────────────
 

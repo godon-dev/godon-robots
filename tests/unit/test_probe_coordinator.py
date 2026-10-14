@@ -83,6 +83,12 @@ def _make_coordinator(config=None, params=None, **overrides):
         collect_upper_bounds_fn=lambda settings: _fake_upper_bounds(settings),
     )
     coord._initialized = True
+    # The notebook answered: no slice debt (rung 5's local ground).
+    # Tests that care about debt seed it themselves — the rest get the
+    # same contract the estate gets from a debt-free map.
+    import time as _time
+    coord._slice_debt_cache = []
+    coord._slice_debt_at = _time.monotonic()
     return coord
 
 
@@ -858,6 +864,9 @@ def test_done_parks_at_neutral():
     coord.state = coord.PROBE_PUSH
     coord._push_count = 0
     coord._converged_params = {'param_0', 'param_1', 'param_2'}  # ask → None
+    # The DONE boundary consults the map's slice debt before DONE may
+    # stand (rung 5); this walk's map names none.
+    coord._slice_debt = lambda force=False: []
     result = coord._handle_probe_push(types.SimpleNamespace(number=1))
     assert coord.state == coord.COOLDOWN
     assert result['mode'] == 'hold', f"expected park, got {result}"
