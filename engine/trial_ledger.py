@@ -69,7 +69,7 @@ _MIGRATIONS = {
 }
 
 
-def classify(mode, impulse_phase, coord_state, dart=False, slice=False):
+def classify(mode, impulse_phase, coord_state, dart=False, ambience=False):
     """The one classification — pinned against the rust reader's
     from_trials. push/pause/hold_calib come from the impulse phase
     (probe_-prefix normalized away: a rename must never re-starve a
@@ -77,13 +77,13 @@ def classify(mode, impulse_phase, coord_state, dart=False, slice=False):
     A seek dart is its OWN kind: a joint random setting is
     unattributable, so no reader may ever bank one as curve ground —
     darts are priors, never map entries.
-    A slice trial is its OWN kind: a fenced own-effect walk at the
-    resting spot — local ground at a named baseline, never chain
+    An ambience trial is its OWN kind: a fenced own-effect walk at the
+    resting spot — ambience entries at a named baseline, never chain
     ground (the map keeps the two scopes apart)."""
     if dart:
         return 'seek_prior'
-    if slice:
-        return 'slice'
+    if ambience:
+        return 'ambience'
     phase = impulse_phase or ''
     if phase.startswith('probe_'):
         phase = phase[len('probe_'):]

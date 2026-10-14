@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for rung 5's robots side — the slice walk mode.
+Unit tests for rung 5's robots side — the ambience walk mode.
 
 The same walk, re-anchored and re-addressed: standing duty's local
 ground rides the probe override (anchor + epoch aboard), the ledger
@@ -123,9 +123,9 @@ def _debt(reason='unmeasured_operating_point', param='param_0',
 
 def test_classify_slice_is_its_own_kind():
     print("\n=== test_classify_slice_is_its_own_kind ===")
-    assert classify('impulse', 'probe_push', 'probe_push', slice=True) == 'slice'
+    assert classify('impulse', 'probe_push', 'probe_push', ambience=True) == 'ambience'
     # phase words never leak into a slice trial's kind
-    assert classify('impulse', 'probe_push', 'probe_pause', slice=True) == 'slice'
+    assert classify('impulse', 'probe_push', 'probe_pause', ambience=True) == 'ambience'
     # non-slice probes classify exactly as before
     assert classify('impulse', 'probe_push', 'probe_push') == 'push'
     assert classify('impulse', 'probe_push', 'probe_push', dart=True) == 'seek_prior'
@@ -139,37 +139,37 @@ def test_override_carries_slice_identity():
     coord = _make_coordinator()
     coord._init_characterization()
     coord.set_probe_override('param_0', [55.0, 45.0],
-                             slice_anchor=50.0, slice_epoch=0)
+                             ambience_anchor=50.0, ambience_epoch=0)
     probe = coord._override_next_probe()
     assert probe is not None
-    assert probe['slice_anchor'] == 50.0
-    assert probe['slice_epoch'] == 0
+    assert probe['ambience_anchor'] == 50.0
+    assert probe['ambience_epoch'] == 0
     # the plain remeasure ride stays unmarked (chain ground)
     coord.set_probe_override('param_0', [60.0])
     probe = coord._override_next_probe()
     assert probe is not None
-    assert 'slice_anchor' not in probe
+    assert 'ambience_anchor' not in probe
     print("  PASS")
 
 
-def test_boundary_walks_slice_debt_before_done():
-    print("\n=== test_boundary_walks_slice_debt_before_done ===")
+def test_boundary_walks_ambience_debt_before_done():
+    print("\n=== test_boundary_walks_ambience_debt_before_done ===")
     coord = _make_coordinator()
     coord._init_characterization()
     coord._char_walk = _done_walk()
     coord.state = coord.PROBE_PUSH
     coord._push_count = 0
-    coord._slice_debt = lambda force=False: _debt()
+    coord._ambience_debt = lambda force=False: _debt()
 
     decision = coord._handle_probe_push(SimpleNamespace(number=1))
     assert decision['mode'] == 'impulse'
-    assert decision['slice_probe'] is True
+    assert decision['ambience_probe'] is True
     assert decision['probe_param'] == 'param_0'
     # fattest gap first: [50,60] prices 5.0 -> midpoint 55.0
     assert decision['probe_level'] == 55.0
     # the batch rides the override, anchor + epoch aboard
     ov = coord._probe_override
-    assert ov['slice_anchor'] == 50.0
+    assert ov['ambience_anchor'] == 50.0
     assert ov['levels'] == [55.0, 45.0]
     print("  PASS")
 
@@ -181,11 +181,11 @@ def test_boundary_done_when_map_names_no_debt():
     coord._char_walk = _done_walk()
     coord.state = coord.PROBE_PUSH
     coord._push_count = 0
-    coord._slice_debt = lambda force=False: []
+    coord._ambience_debt = lambda force=False: []
 
     decision = coord._handle_probe_push(SimpleNamespace(number=1))
     assert coord.state == coord.COOLDOWN  # DONE handed off, walk ended
-    assert 'slice_probe' not in decision
+    assert 'ambience_probe' not in decision
     print("  PASS")
 
 
@@ -197,7 +197,7 @@ def test_boundary_parks_on_dark_consult():
     coord._char_walk = _done_walk()
     coord.state = coord.PROBE_PUSH
     coord._push_count = 0
-    coord._slice_debt = lambda force=False: None  # dark: not an answer
+    coord._ambience_debt = lambda force=False: None  # dark: not an answer
 
     decision = coord._handle_probe_push(SimpleNamespace(number=1))
     assert coord.state == coord.PROBE_PUSH  # parked, not ended
@@ -234,13 +234,13 @@ def test_placement_skips_banked_and_caps_batch():
     ]
     coord = _make_coordinator()
     coord._init_characterization()
-    coord._slice_debt = lambda force=False: _debt(
+    coord._ambience_debt = lambda force=False: _debt(
         levels=(51.25,), gaps=gaps)
 
-    probe = coord._slice_duty_probe()
+    probe = coord._ambience_duty_probe()
     assert probe is not None
     ov = coord._probe_override
-    assert len(ov['levels']) == coord.SLICE_WALK_BATCH  # capped at 8
+    assert len(ov['levels']) == coord.AMBIENCE_WALK_BATCH  # capped at 8
     # the banked midpoint (51.25) never repeats
     assert all(abs(l - 51.25) > 1e-9 for l in ov['levels'])
     # priced-out gaps never place
@@ -259,10 +259,10 @@ def test_placement_fences_to_param_bounds():
     ]
     coord = _make_coordinator()
     coord._init_characterization()
-    coord._slice_debt = lambda force=False: _debt(
+    coord._ambience_debt = lambda force=False: _debt(
         anchor=95.0, levels=(95.0,), gaps=gaps)
 
-    probe = coord._slice_duty_probe()
+    probe = coord._ambience_duty_probe()
     assert probe is not None
     assert coord._probe_override['levels'] == [100.0]  # clamped to bound
     print("  PASS")
@@ -296,18 +296,18 @@ def test_probe_result_payload_carries_slice_fields(monkeypatch):
     monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
 
     probe = {'param_name': 'param_0', 'level': 55.0,
-             'slice_anchor': 50.0, 'slice_epoch': 0}
+             'ambience_anchor': 50.0, 'ambience_epoch': 0}
     coord._query_causal_probe_result(probe)
     import json
     payload = json.loads(captured['data'])
-    assert payload['slice_anchor'] == 50.0
-    assert payload['slice_epoch'] == 0
+    assert payload['ambience_anchor'] == 50.0
+    assert payload['ambience_epoch'] == 0
 
     # plain probes bank exactly as before — no slice residue
     probe = {'param_name': 'param_0', 'level': 60.0}
     coord._query_causal_probe_result(probe)
     payload = json.loads(captured['data'])
-    assert 'slice_anchor' not in payload
+    assert 'ambience_anchor' not in payload
     print("  PASS")
 
 
@@ -319,13 +319,13 @@ def test_unmeasured_debt_holds_the_tender():
     coord._init_characterization()
     coord._char_walk = _done_walk()
 
-    coord._slice_debt_cache = _debt()
-    coord._slice_debt_at = time.monotonic()
+    coord._ambience_debt_cache = _debt()
+    coord._ambience_debt_at = time.monotonic()
     assert coord._walk_pending() is True
     assert coord.char_complete() is False
 
-    coord._slice_debt_cache = []  # patches exist: aging-only world
-    coord._slice_debt_at = time.monotonic()
+    coord._ambience_debt_cache = []  # patches exist: aging-only world
+    coord._ambience_debt_at = time.monotonic()
     assert coord._walk_pending() is False
     assert coord.char_complete() is True
     print("  PASS")
@@ -338,11 +338,11 @@ if __name__ == '__main__':
 
     test_classify_slice_is_its_own_kind()
     test_override_carries_slice_identity()
-    test_boundary_walks_slice_debt_before_done()
+    test_boundary_walks_ambience_debt_before_done()
     test_boundary_done_when_map_names_no_debt()
     test_boundary_parks_on_dark_consult()
     test_placement_skips_banked_and_caps_batch()
     test_placement_fences_to_param_bounds()
     test_probe_result_payload_carries_slice_fields(monkeypatch=_Mp())
     test_unmeasured_debt_holds_the_tender()
-    print("\nall slice duty tests passed")
+    print("\nall ambience duty tests passed")

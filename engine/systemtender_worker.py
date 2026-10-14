@@ -1329,7 +1329,7 @@ class SystemtenderWorker:
                         decision.get('impulse_phase'),
                         self._probe_coordinator.get_state(),
                         dart=bool(decision.get('seek_dart')),
-                        slice=bool(decision.get('slice_probe'))))
+                        ambience=bool(decision.get('ambience_probe'))))
                     # The why, as evidence: everything the coordinator
                     # returned for this trial (params ride separately).
                     trial.set_user_attr('decision', json.dumps(
