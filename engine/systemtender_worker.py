@@ -1328,7 +1328,8 @@ class SystemtenderWorker:
                         detection_mode,
                         decision.get('impulse_phase'),
                         self._probe_coordinator.get_state(),
-                        dart=bool(decision.get('seek_dart'))))
+                        dart=bool(decision.get('seek_dart')),
+                        slice=bool(decision.get('slice_probe'))))
                     # The why, as evidence: everything the coordinator
                     # returned for this trial (params ride separately).
                     trial.set_user_attr('decision', json.dumps(
