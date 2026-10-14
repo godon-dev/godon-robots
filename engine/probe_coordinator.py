@@ -140,13 +140,13 @@ class ProbeCoordinator:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
-        # Slice duty (rung 5): the map's named local-ground debt for
+        # Slice duty (rung 5): the map's named ambience debt for
         # THIS tender, memoized so per-trial polls (char_complete,
         # demand publication) never hammer the notebook. None = not
         # consulted or the consult went dark (never cached: a dark
         # view is not an answer).
-        self._slice_debt_cache: Optional[List[Dict[str, Any]]] = None
-        self._slice_debt_at: Optional[float] = None
+        self._ambience_debt_cache: Optional[List[Dict[str, Any]]] = None
+        self._ambience_debt_at: Optional[float] = None
 
         # Quantum: the slice of probe cycles one systemtender holds the lease
         # before yielding to a walk-pending peer. Yield only under
@@ -748,13 +748,13 @@ class ProbeCoordinator:
         bounds = self._param_bounds.get(probe['param_name'])
         if bounds:
             payload['param_range'] = bounds['upper'] - bounds['lower']
-        if probe.get('slice_anchor') is not None:
-            # The local-ground bank (rung 5): causal keys the resting
+        if probe.get('ambience_anchor') is not None:
+            # The ambience bank (rung 5): causal keys the resting
             # spot from its own standing-params read, pinned at this
             # anchor — the walk's own declaration of where it lives.
-            payload['slice_anchor'] = probe['slice_anchor']
-            if probe.get('slice_epoch') is not None:
-                payload['slice_epoch'] = probe['slice_epoch']
+            payload['ambience_anchor'] = probe['ambience_anchor']
+            if probe.get('ambience_epoch') is not None:
+                payload['ambience_epoch'] = probe['ambience_epoch']
 
         timeout = self._causal_timeout()
         url = f"{self._causal_url}/characterize"
@@ -970,11 +970,11 @@ class ProbeCoordinator:
     # ── Probe override (precise remeasure) ────────────────────────────
 
     def set_probe_override(self, param_name: str, levels,
-                           slice_anchor=None, slice_epoch=None) -> None:
+                           ambience_anchor=None, ambience_epoch=None) -> None:
         """Pin the next push blocks to one param at the given levels —
-        the wish's precise remeasure, and the instrument the slice
-        re-walk rides (rung 5): when slice_anchor is present the probe
-        banks as local ground at that resting spot, epoch-stamped. The
+        the wish's precise remeasure, and the instrument the ambience
+        re-walk rides (rung 5): when ambience_anchor is present the probe
+        banks as ambience entries at that resting spot, epoch-stamped. The
         lease, push/pause windows and characterize calls stay this
         coordinator's own machinery; only the WHERE of the probe is
         pinned. Cleared when the levels are exhausted (the coverage
@@ -983,10 +983,10 @@ class ProbeCoordinator:
             'param_name': param_name,
             'levels': [float(l) for l in levels],
             'idx': 0,
-            'slice_anchor': (float(slice_anchor)
-                             if slice_anchor is not None else None),
-            'slice_epoch': (int(slice_epoch)
-                            if slice_epoch is not None else None),
+            'ambience_anchor': (float(ambience_anchor)
+                             if ambience_anchor is not None else None),
+            'ambience_epoch': (int(ambience_epoch)
+                            if ambience_epoch is not None else None),
         }
 
     def _override_next_probe(self) -> Optional[Dict[str, Any]]:
@@ -1020,9 +1020,9 @@ class ProbeCoordinator:
             'level': level,
             'config': config,
         }
-        if ov.get('slice_anchor') is not None:
-            out['slice_anchor'] = ov['slice_anchor']
-            out['slice_epoch'] = ov.get('slice_epoch') or 0
+        if ov.get('ambience_anchor') is not None:
+            out['ambience_anchor'] = ov['ambience_anchor']
+            out['ambience_epoch'] = ov.get('ambience_epoch') or 0
         return out
 
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
@@ -1055,19 +1055,19 @@ class ProbeCoordinator:
             'config': config,
         }
 
-    # ── Slice duty (rung 5: standing duty's local ground) ────────────
+    # ── Slice duty (rung 5: standing duty's ambience entries) ────────────
 
     # Consult memo lifetime. char_complete and demand publication poll
     # per trial; the notebook deserves one GET per this window, not one
     # per trial. Boundaries (the DONE-boundary consult) always re-ask.
-    SLICE_DEBT_TTL = 60.0
+    AMBIENCE_DEBT_TTL = 60.0
     # One consult's fence batch: walk this many window levels, then
     # re-consult — the window may have priced wider by then, and a
     # stale batch must never outlive its own fence.
-    SLICE_WALK_BATCH = 8
+    AMBIENCE_WALK_BATCH = 8
 
-    def _slice_debt(self, force=False) -> Optional[List[Dict[str, Any]]]:
-        """The map's named local-ground debt for THIS tender.
+    def _ambience_debt(self, force=False) -> Optional[List[Dict[str, Any]]]:
+        """The map's named ambience debt for THIS tender.
 
         Returns the debt list (possibly empty), or None when the
         consult went dark — None is never cached and never walked on:
@@ -1081,17 +1081,17 @@ class ProbeCoordinator:
         import time as _time
         now = _time.monotonic()
         if (not force
-                and self._slice_debt_at is not None
-                and now - self._slice_debt_at < self.SLICE_DEBT_TTL
-                and self._slice_debt_cache is not None):
-            return self._slice_debt_cache
+                and self._ambience_debt_at is not None
+                and now - self._ambience_debt_at < self.AMBIENCE_DEBT_TTL
+                and self._ambience_debt_cache is not None):
+            return self._ambience_debt_cache
 
         import urllib.request
         import json as _json
         from urllib.parse import urlencode
         from urllib.error import HTTPError
         qs = urlencode({"group": self.group_id})
-        url = f"{self._causal_url}/slice-duty/{self.systemtender_id}?{qs}"
+        url = f"{self._causal_url}/ambience-duty/{self.systemtender_id}?{qs}"
         req = urllib.request.Request(url, method='GET')
         try:
             with urllib.request.urlopen(req, timeout=self._causal_timeout()) as resp:
@@ -1103,35 +1103,35 @@ class ProbeCoordinator:
                 # a tender on an answered page would be the dark-view
                 # sin inverted.
                 logger.info(
-                    f"SLICE DUTY: notebook has no duty page ({e.code}) — no debt")
-                self._slice_debt_cache = []
-                self._slice_debt_at = _time.monotonic()
-                return self._slice_debt_cache
-            logger.warning(f"SLICE DUTY: consult dark ({e}) — parking the question")
+                    f"AMBIENCE DUTY: notebook has no duty page ({e.code}) — no debt")
+                self._ambience_debt_cache = []
+                self._ambience_debt_at = _time.monotonic()
+                return self._ambience_debt_cache
+            logger.warning(f"AMBIENCE DUTY: consult dark ({e}) — parking the question")
             return None
         except Exception as e:
-            logger.warning(f"SLICE DUTY: consult dark ({e}) — parking the question")
+            logger.warning(f"AMBIENCE DUTY: consult dark ({e}) — parking the question")
             return None
         debt = list(body.get('debt', []))
-        self._slice_debt_cache = debt
-        self._slice_debt_at = now
+        self._ambience_debt_cache = debt
+        self._ambience_debt_at = now
         return debt
 
-    def _slice_unmeasured_pending(self) -> bool:
-        """The bounded half of slice debt: patches that do not exist
+    def _ambience_unmeasured_pending(self) -> bool:
+        """The bounded half of ambience debt: entries that do not exist
         yet. This alone extends walk-pending and holds the quiet-bench
-        lever — the tender stays while local ground is missing, and
+        lever — the tender stays while ambience entries is missing, and
         leaves once it exists. Window aging deliberately does NOT gate
         here: re-walking stale windows rides whatever lifetime the
         room's activity gives (the aging-vs-lifetime edge is named in
         the rung's PR for the holder's ruling)."""
-        debt = self._slice_debt()
+        debt = self._ambience_debt()
         if debt is None:
-            raise WalkViewUnavailable("slice-duty consult dark")
+            raise WalkViewUnavailable("ambience-duty consult dark")
         return any(d.get('reason') == 'unmeasured_operating_point' for d in debt)
 
-    def _slice_duty_probe(self) -> Optional[Dict[str, Any]]:
-        """The DONE-boundary consult: the map names its local-ground
+    def _ambience_duty_probe(self) -> Optional[Dict[str, Any]]:
+        """The DONE-boundary consult: the map names its ambience
         debt, standing duty walks it before DONE may stand.
 
         Placement stays here — the dumb stateless legs: midpoint of
@@ -1143,9 +1143,9 @@ class ProbeCoordinator:
         boundary (or the named dials are unknown to this strain).
         Raises WalkViewUnavailable on a dark consult.
         """
-        debt = self._slice_debt(force=True)
+        debt = self._ambience_debt(force=True)
         if debt is None:
-            raise WalkViewUnavailable("slice-duty consult dark")
+            raise WalkViewUnavailable("ambience-duty consult dark")
         entry = next((e for e in debt
                       if e.get('param') in self._param_bounds), None)
         if entry is None:
@@ -1169,7 +1169,7 @@ class ProbeCoordinator:
             if any(abs(mid - l) < 1e-9 for l in levels):
                 continue
             levels.append(mid)
-            if len(levels) >= self.SLICE_WALK_BATCH:
+            if len(levels) >= self.AMBIENCE_WALK_BATCH:
                 break
         if not levels:
             # The window is walked to priced-out: no debt this
@@ -1178,10 +1178,10 @@ class ProbeCoordinator:
             return None
 
         self.set_probe_override(param, levels,
-                                slice_anchor=entry['anchor'],
-                                slice_epoch=entry.get('epoch') or 0)
+                                ambience_anchor=entry['anchor'],
+                                ambience_epoch=entry.get('epoch') or 0)
         logger.info(
-            f"SLICE DUTY: param={param} anchor={entry['anchor']} "
+            f"AMBIENCE DUTY: param={param} anchor={entry['anchor']} "
             f"window={entry.get('window')} reason={entry.get('reason')} "
             f"levels={len(levels)} epoch={entry.get('epoch') or 0}")
         return self._override_next_probe()
@@ -1286,7 +1286,7 @@ class ProbeCoordinator:
                 return False
             # Local ground outstanding: the tender stays (rung 5's
             # bounded debt — the quiet-bench lever waits for patches).
-            return not self._slice_unmeasured_pending()
+            return not self._ambience_unmeasured_pending()
         except WalkViewUnavailable as e:
             # A slow notebook must not kill the tender (run 35224443449:
             # one >2s view read failed the whole worker job). Not
@@ -1427,14 +1427,14 @@ class ProbeCoordinator:
     def _walk_pending(self) -> bool:
         """Non-advancing check: can the walk still produce a probe for
         unconverged params at the current refinement floor — or does
-        the map still name unmeasured local ground (rung 5's bounded
+        the map still name unmeasured ambience entries (rung 5's bounded
         debt: patches that do not exist yet)?"""
         if self._char_walk is None:
             return False
         try:
             if self._char_walk.can_probe(self._converged_params):
                 return True
-            return self._slice_unmeasured_pending()
+            return self._ambience_unmeasured_pending()
         except WalkViewUnavailable as e:
             # Dark view: stay engaged (True). Parking on a dark view
             # would falsely end the walk; the notebook is authoritative
@@ -1467,15 +1467,15 @@ class ProbeCoordinator:
                         f"skipping this trial boundary")
                     return self._idle_result()
             if probe is None:
-                # Standing duty's local ground (rung 5): before DONE
+                # Standing duty's ambience entries (rung 5): before DONE
                 # may stand, the map's named slice debt gets its walk
                 # — the same push/pause machinery, one dial fenced to
                 # a window around its held value.
                 try:
-                    probe = self._slice_duty_probe()
+                    probe = self._ambience_duty_probe()
                 except WalkViewUnavailable as e:
                     logger.warning(
-                        f"SLICE DUTY: consult dark ({e}) — "
+                        f"AMBIENCE DUTY: consult dark ({e}) — "
                         f"skipping this trial boundary")
                     return self._idle_result()
             if probe is None:
@@ -1507,10 +1507,10 @@ class ProbeCoordinator:
             'probe_level': probe['level'],
             'detection_trial': True,
         }
-        if probe and probe.get('slice_anchor') is not None:
+        if probe and probe.get('ambience_anchor') is not None:
             # The fenced walk at the resting spot: the ledger's kind
-            # stamp and causal's local-ground bank both key on this.
-            out['slice_probe'] = True
+            # stamp and causal's ambience bank both key on this.
+            out['ambience_probe'] = True
         return out
 
     # ── PROBE_PAUSE (sender) ─────────────────────────────────────────
