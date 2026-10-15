@@ -1374,6 +1374,61 @@ class SystemtenderWorker:
 
         wmill.set_state(state)
         logger.debug(f"Updated Windmill state: {state}")
+        self._stamp_instruments(state)
+
+    def _stamp_instruments(self, state: dict):
+        """The rung-7 field-sets, stamped where the estate reads them.
+
+        wmill.set_state stays the windmill face; this is the door's
+        copy — the same systemtender_state row the controller's
+        verdict reads (beat + finished) grows the instruments as one
+        JSON column. One tiny UPDATE per state refresh on its own
+        throwaway connection, the heartbeat's pattern: never the
+        ledger's access, and a failed stamp never kills the run —
+        the next refresh retries.
+        """
+        import json
+        import psycopg2
+        instruments = {
+            'strategies_run': state.get('strategies_run'),
+            'wish': state.get('wish'),
+            'seek_spend': state.get('seek_spend'),
+        }
+        payload = json.dumps(instruments)
+        conn = None
+        try:
+            conn = psycopg2.connect(self._get_libpq_url())
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        "UPDATE systemtender_state SET instruments = %s",
+                        (payload,))
+                except Exception as e:
+                    # first stamp on a state row born before this
+                    # column: ensure it, then stamp again (rollout-order
+                    # independent). Message-matched, because the exact
+                    # error class differs between real psycopg2 and
+                    # test stubs — the heartbeat's own guard pattern.
+                    if not ('instruments' in str(e)
+                            and 'does not exist' in str(e)):
+                        raise
+                    conn.rollback()
+                    cur.execute(
+                        "ALTER TABLE systemtender_state "
+                        "ADD COLUMN IF NOT EXISTS instruments TEXT")
+                    cur.execute(
+                        "UPDATE systemtender_state SET instruments = %s",
+                        (payload,))
+            conn.commit()
+        except Exception as e:
+            logger.debug(
+                f"instruments stamp failed (retries on next state refresh): {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def run(self):
         logger.info(f"Starting SystemtenderWorker: {self.worker_id}")
