@@ -340,25 +340,63 @@ class SystemtenderWorker:
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
 
-    def _park_before_announcement(self) -> None:
-        """Apply the neutral park BEFORE the tender announces itself to
-        the room (registration). The bench boots at param_lower - the
-        dials' extreme - and a registration that outran the first park
-        let the room's first measurement window bank that extreme as
-        whoever probed first."""
+    def _boot_park_params(self):
+        """The park target at boot (rung 8, designs/2026-10-11 XX).
+
+        A relaunched holder keeps its measured state: dials are
+        target-host settings and persist across worker death, so the
+        park asserts the last standing params instead of dragging a
+        held dial back to neutral and breaking the hold the worker is
+        about to resume. A receiver's contribution is stillness - it
+        parks at neutral. A bare boot (no assignment row) parks at
+        neutral exactly as before."""
+        try:
+            assignment = self.ledger.wish_latest()
+            wish_id, role = assignment if assignment else (None, None)
+        except Exception as e:
+            logger.warning(f"BOOT PARK: assignment read failed ({e}) - treating as bare boot")
+            wish_id, role = None, None
+        if wish_id:
+            if (role or 'sender') == 'receiver':
+                logger.info(f"BOOT PARK: receiver of wish {wish_id} - stillness, parking neutral")
+            else:
+                try:
+                    state_json = self.ledger.state_get(self._get_rollback_state_key())
+                    standing = None
+                    if state_json:
+                        standing = json.loads(state_json).get('last_successful_params')
+                    if standing:
+                        logger.info(
+                            f"BOOT PARK: resuming holder of wish {wish_id} "
+                            f"at last standing params ({len(standing)} dials)")
+                        return standing
+                    logger.info(f"BOOT PARK: wish {wish_id} held but no standing params - parking neutral")
+                except Exception as e:
+                    logger.warning(f"BOOT PARK: standing read failed ({e}) - parking neutral")
         try:
             neutral = self._compute_neutral_params()
         except Exception as e:
             logger.warning(f"BOOT PARK: neutral computation failed ({e}) - skipping; the room may see boot state")
-            return
-        if not neutral:
-            logger.warning("BOOT PARK: no neutral params - skipping")
+            return None
+        return neutral
+
+    def _park_before_announcement(self) -> None:
+        """Apply the boot park BEFORE the tender announces itself to
+        the room (registration). The bench boots at param_lower - the
+        dials' extreme - and a registration that outran the first park
+        let the room's first measurement window bank that extreme as
+        whoever probed first. The target: neutral on a bare boot, the
+        last standing params when a held wish waits in the ledger
+        (rung 8 - the death resume)."""
+        target = self._boot_park_params()
+        if not target:
+            logger.warning("BOOT PARK: no park target - skipping")
             return
         try:
-            self._execute_trial(neutral)
-            logger.info(f"BOOT PARK: dials at neutral before announcement ({len(neutral)} dials)")
+            self._execute_trial(target)
+            logger.info(f"BOOT PARK: {len(target)} dials applied before announcement")
         except Exception as e:
-            logger.warning(f"BOOT PARK: neutral apply failed ({e}) - skipping; the room may see boot state")
+            logger.warning(f"BOOT PARK: apply failed ({e}) - skipping; the room may see boot state")
 
     def _publish_standing_params(self, params):
         """Refresh this systemtender's applied params in the heartbeat table.
