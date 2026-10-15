@@ -97,6 +97,17 @@ class SeekDriver:
         """The worker pays here, once per trial — the single payer."""
         self._wallet.pay(units)
 
+    @property
+    def wallet_status(self) -> dict:
+        """Guard (rung 7): read-only live view for the status payload —
+        the wallet's numbers. The RETURN carries the same numbers at
+        the end of the commission; this is the mid-flight read."""
+        return {
+            'budget': self._wallet.budget,
+            'spent': self._wallet.spent,
+            'remaining': self._wallet.remaining,
+        }
+
     def step(self) -> Optional[Dict[str, Any]]:
         """The next commission, or None when the seek is complete.
 

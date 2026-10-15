@@ -177,6 +177,11 @@ class SystemtenderWorker:
         # The seek wish's driver (one commission per trial-block while
         # a seek holds this tender); None whenever no seek is bound.
         self._seek_driver = None
+        # Guard (rung 7) state: the strategy set run so far (the
+        # status field-set reads it) and the wish the pin receipt was
+        # last logged for (one receipt per held wish, not per loop).
+        self._strategies_run = set()
+        self._pin_receipt = None
         # The open commission: a dart (direct joint push) or a pass
         # (handed to the coordinator's probe override). None between
         # commissions.
@@ -738,6 +743,28 @@ class SystemtenderWorker:
             logger.info("Stopping: Shutdown requested by controller")
             return False
 
+        # Guard (rung 7): a held wish pins the holder. Walk-complete is
+        # the walk's verdict and stays true while holding — but a holder
+        # does not act on it: the wish is a standing service on the
+        # wish's own budget, and leaving would strand its assignment in
+        # a dead tender's ledger. The pin beats the quiet-bench lever;
+        # the stop flag above still beats the pin — a noticed exit
+        # releases the dial in run()'s finally instead.
+        if self._wish is not None:
+            coord = getattr(self, '_probe_coordinator', None)
+            walk_done = (
+                coord is not None
+                and getattr(coord, 'char_complete', None) is not None
+                and coord.char_complete() is True)
+            if walk_done and self._pin_receipt != self._wish.get('wish_id'):
+                self._pin_receipt = self._wish.get('wish_id')
+                logger.info(
+                    f"Characterization complete but wish "
+                    f"{self._wish.get('wish_id')} held — pinning past "
+                    f"walk-complete (guard): finished walkers leave, "
+                    f"holders park")
+            return True
+
         # Quiet-bench lever: when the characterization walk has nothing
         # left to probe (all params converged or refinement depth spent),
         # the tender lets itself out — finished walkers leave, the room
@@ -1225,6 +1252,28 @@ class SystemtenderWorker:
             if coord is not None and hasattr(coord, 'set_probe_override'):
                 coord.set_probe_override(probe['param'], [probe['level']])
 
+    def _complete_or_fail(self, trial, values, detection_mode) -> None:
+        """Guard (rung 7): no strategy stamp, no completion. An
+        unattributed trial is unauditable spend — accounting filters
+        the ledger BY the stamp, so a trial that somehow reached
+        completion without one fails loud instead: receipt logged,
+        the ledger row telling the truth."""
+        if detection_mode is None:
+            logger.error(
+                f"Trial {trial.number} reached completion WITHOUT a "
+                f"strategy stamp — failing the trial (guard)")
+            self._retry_op(
+                lambda: self.ledger.fail(
+                    trial.number,
+                    'unstamped: strategy attribution missing (guard)'),
+                f"ledger.fail (trial {trial.number})"
+            )
+            return
+        self._retry_op(
+            lambda: self.ledger.complete(trial.number, values[0]),
+            f"ledger.complete (trial {trial.number})"
+        )
+
     def _release_wish(self, delete_assignment: bool = False) -> None:
         if not self._wish:
             return
@@ -1247,13 +1296,42 @@ class SystemtenderWorker:
                     f"{self._wish.get('wish_id')}: {e}")
         self._wish = None
 
+    def _wish_summary(self) -> Optional[dict]:
+        """Guard (rung 7) status field-set: the held wish in this
+        tender's own words — which wish, which instruction, which
+        dials. None = nothing held."""
+        if self._wish is None:
+            return None
+        return {
+            'wish_id': self._wish.get('wish_id'),
+            'instruction': self._wish.get('instruction'),
+            'role': self._wish.get('role'),
+            'dials': sorted((self._wish.get('moves') or {}).keys()),
+        }
+
+    def _seek_spend(self) -> Optional[dict]:
+        """Guard (rung 7) status field-set: the commissioned walk's
+        wallet, live — budget, spent, remaining, in feelers. None =
+        no seek bound."""
+        driver = self._seek_driver
+        if driver is None:
+            return None
+        return dict(driver.wallet_status)
+
     def _update_state(self):
         import wmill
         state = {
             'systemtender_id': self.systemtender_id,
             'total_trials': self.ledger.count(),
             'study_name': f"{self.systemtender_id}_study",
-            'status': 'running'
+            'status': 'running',
+            # Guard (rung 7): field-sets, not statuses — instruments,
+            # each named, none invented. The status word stays one;
+            # the payload grows named facts. Spellings provisional
+            # until the vocabulary seal.
+            'strategies_run': sorted(self._strategies_run),
+            'wish': self._wish_summary(),
+            'seek_spend': self._seek_spend(),
         }
 
         wmill.set_state(state)
@@ -1298,6 +1376,7 @@ class SystemtenderWorker:
                 trial_start_time = time.time()
 
                 params = None
+                detection_mode = None
 
                 try:
                     # === Wish serving (steer mode) ===
@@ -1355,6 +1434,7 @@ class SystemtenderWorker:
                         # pause rounds refresh the curve causal re-plans from.
                         pass
                     detection_mode = decision['mode']
+                    self._strategies_run.add(detection_mode)
 
                     # The classification, written once — readers bucket
                     # by kind, never by string-matching attr literals.
@@ -1548,10 +1628,7 @@ class SystemtenderWorker:
                                     lease_phase=obs_phase,
                                 )
 
-                        self._retry_op(
-                            lambda: self.ledger.complete(trial.number, values[0]),
-                            f"ledger.complete (trial {trial.number})"
-                        )
+                        self._complete_or_fail(trial, values, detection_mode)
 
                         trial_duration = time.time() - trial_start_time
 
@@ -1608,6 +1685,13 @@ class SystemtenderWorker:
             if self._seek_driver is not None:
                 self._seek_driver.abort()
                 self._finish_seek()
+            # Guard (rung 7): every exit is a clean exit. A held
+            # wish's dial reverts to neutral and the assignment row
+            # goes with it — this tender is leaving, and a row
+            # pointing at a quiet house is a lie the pulse would keep
+            # adopting. Unnoticed deaths still orphan honestly (the
+            # room shows them as history); a noticed exit cleans up.
+            self._release_wish(delete_assignment=True)
             self._stamp_finished()
             self.metrics.push()
 
