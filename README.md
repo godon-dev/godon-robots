@@ -20,7 +20,7 @@ The system follows an **engine + strains** architecture: the engine (`engine/`) 
 
 ### Engine (`engine/`)
 
-- **SystemtenderWorker** — the robot loop: lifecycle management, lease citizenship, guardrail checking, rollback support
+- **SystemtenderWorker** — the robot loop: lifecycle management, lease citizenship, guardrail checking, rollback support, wish serving — a held wish pins the tender past walk-complete, and every exit reverts held dials to neutral
 - **ProbeCoordinator** — the detection/characterization loop: decides what to probe next, and when a curve is done
 - **Characterization** — response curve interpolation and convergence detection
 - **WalkPolicy** — stateless walk policy over the causal notebook page: picks the next level from banked measurements
