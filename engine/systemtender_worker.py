@@ -1046,6 +1046,11 @@ class SystemtenderWorker:
             'role': 'sender',
         }
         self._seek_driver = SeekDriver(seek_plan, region_policy(seek_plan.region))
+        # Pre-step prevention: the page's guards (computed fresh by the
+        # map's owner on every serve) ride in with the plan; the walk
+        # never steps a level a measured guard says would break a
+        # standing band.
+        self._seek_driver.set_guards(plan.get('guards') or [])
         logger.info(
             f"Wish {wish_id} adopted as SEEK: form={seek_plan.form}, "
             f"dials={sorted(seek_plan.region)}, budget={seek_plan.budget}, "
@@ -1187,7 +1192,12 @@ class SystemtenderWorker:
             # page that speaks another instruction must not silently
             # flip a commissioned walk into a hold. A release aborts
             # honestly — the seek comes home RETURNED with what it
-            # holds, the spend never lost.
+            # holds, the spend never lost. Every serve refreshes the
+            # walk's guards (the standing set moves; the page computes
+            # them fresh from the map's own readings).
+            if self._seek_driver is not None \
+                    and plan.get('guards') is not None:
+                self._seek_driver.set_guards(plan.get('guards') or [])
             if plan.get('instruction') == 'release':
                 if self._seek_driver is not None:
                     self._seek_driver.abort()

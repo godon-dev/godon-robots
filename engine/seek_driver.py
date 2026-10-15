@@ -51,6 +51,21 @@ STOP_BUDGET = 'budget_exhausted'
 STOP_CONVERGED = 'converged'
 STOP_REGION = 'region_walked'
 STOP_STOPPED = 'stopped'
+STOP_GUARDS = 'guards_closed'
+
+
+def _interp(points, x):
+    """Piecewise-linear shift at level x over sorted (level, shift)
+    points; None outside the measured span."""
+    if x < points[0][0] or x > points[-1][0]:
+        return None
+    for (l0, s0), (l1, s1) in zip(points, points[1:]):
+        if l0 <= x <= l1:
+            if l1 == l0:
+                return s0
+            t = (x - l0) / (l1 - l0)
+            return s0 + t * (s1 - s0)
+    return points[-1][1]
 
 
 class SeekDriver:
@@ -59,9 +74,19 @@ class SeekDriver:
     the tender runs while the seek holds it is the seek's spend —
     darts and protocol trials alike, one payer, no double count)."""
 
-    def __init__(self, plan: SeekPlan, policy: Policy):
+    def __init__(self, plan: SeekPlan, policy: Policy,
+                 initial_levels: Optional[Dict[str, Any]] = None):
         self._plan = plan
         self._policy = policy
+        # Pre-step prevention (design §XIX spillover): the guards other
+        # live wishes' bands publish for this walk's dials, refreshed
+        # on every page serve. The walk never steps a level a measured
+        # guard says would break a standing band; a fully closed region
+        # comes home with the numbers instead.
+        self._guards: Dict[str, List[Dict[str, Any]]] = {}
+        self._guard_blocks: Dict[str, List[Dict[str, Any]]] = {}
+        self._guard_closed_dials: List[str] = []
+        self._initial_levels: Dict[str, Any] = dict(initial_levels or {})
         self._wallet = Wallet(budget=plan.budget)
         self._direction = (plan.criterion or {}).get('direction', MAXIMIZE)
 
@@ -97,6 +122,57 @@ class SeekDriver:
         """The worker pays here, once per trial — the single payer."""
         self._wallet.pay(units)
 
+    def set_guards(self, guards: List[Dict[str, Any]]) -> None:
+        """Adopt the page's guards (computed fresh on every serve by
+        the map's owner; never stored). Unmeasured ground publishes no
+        guard — detection still covers it there."""
+        per_dial: Dict[str, List[Dict[str, Any]]] = {}
+        for g in guards or []:
+            param = g.get('param')
+            if param is not None:
+                per_dial.setdefault(param, []).append(g)
+        self._guards = per_dial
+        self._guard_blocks = {}
+        self._guard_closed_dials = []
+
+    def _breaks(self, dial: str, level: Any) -> Optional[Dict[str, Any]]:
+        """The guard this level would break, or None. Reading under the
+        step = the guard's reading now + the measured shift delta from
+        the dial's current level (the walk's own baseline); the band
+        widens by the standing plan's error bar. Outside the curve's
+        measured span, or without a current-level reference, the guard
+        cannot certify a break — detection covers that ground."""
+        try:
+            x = float(level)
+        except (TypeError, ValueError):
+            return None
+        x_now = self._baseline.get(dial)
+        if x_now is None:
+            x_now = self._initial_levels.get(dial)
+        if x_now is None:
+            return None
+        try:
+            x_now = float(x_now)
+        except (TypeError, ValueError):
+            return None
+        for g in self._guards.get(dial, []):
+            pts = sorted(
+                (float(p[0]), float(p[1]))
+                for p in (g.get('curve') or [])
+                if p is not None and len(p) >= 2)
+            if len(pts) < 2:
+                continue
+            s_now = _interp(pts, x_now)
+            s_x = _interp(pts, x)
+            if s_now is None or s_x is None:
+                continue  # outside the measured span: the guard is silent
+            reading = float(g.get('now')) + (s_x - s_now)
+            margin = float(g.get('margin') or 0.0)
+            if reading < float(g['lo']) - margin \
+                    or reading > float(g['hi']) + margin:
+                return g
+        return None
+
     def step(self) -> Optional[Dict[str, Any]]:
         """The next commission, or None when the seek is complete.
 
@@ -119,10 +195,27 @@ class SeekDriver:
                 self._finish(STOP_BUDGET)
                 return None
             else:
-                params = self._darts.pop(0)
-                self._pending = {'phase': DARTS, 'mode': 'push',
-                                 'params': params, 'dart': True}
-                return dict(self._pending)
+                while self._darts:
+                    params = self._darts.pop(0)
+                    breaker = None
+                    for d, v in (params or {}).items():
+                        breaker = self._breaks(d, v)
+                        if breaker is not None:
+                            break
+                    if breaker is None:
+                        break
+                    # a dart that would break a standing band never
+                    # runs and never costs: drop it, take the next
+                    first = next(iter(params or {'?': None}))
+                    self._guard_blocks.setdefault(first, []).append(breaker)
+                else:
+                    params = None
+                if params is None:
+                    self._phase = PASSES  # every dart broke a guard
+                else:
+                    self._pending = {'phase': DARTS, 'mode': 'push',
+                                     'params': params, 'dart': True}
+                    return dict(self._pending)
 
         while self._phase == PASSES:
             if self._dial_idx >= len(self._dials):
@@ -134,7 +227,20 @@ class SeekDriver:
                 self._finish(STOP_BUDGET)
                 return None
             level = self._policy(dial, self._measured.get(dial, []))
+            while level is not None and self._breaks(dial, level) is not None:
+                # Pre-step prevention: a level a measured guard breaks
+                # is never stepped — it joins the asked list so the
+                # placement moves on, and costs nothing.
+                breaker = self._breaks(dial, level)
+                self._guard_blocks.setdefault(dial, []).append(breaker)
+                self._measured.setdefault(dial, []).append(level)
+                level = self._policy(dial, self._measured.get(dial, []))
             if level is None:
+                if (self._guard_blocks.get(dial)
+                        and not self._dial_readings.get(dial)):
+                    # everything this dial could ask breaks a guard:
+                    # the region closed for it, with the numbers on record
+                    self._guard_closed_dials.append(dial)
                 # The dial prices out: step the baseline to its best
                 # measured level and move to the next dial.
                 self._step_baseline(dial)
@@ -186,8 +292,18 @@ class SeekDriver:
         best = rank(self._dart_findings + self._pass_findings,
                     {'direction': self._direction}) \
             if self._plan.form == FIND_BEST else None
-        return build_return(best, self._wallet,
-                            self._stop_reason or STOP_CONVERGED)
+        out = build_return(best, self._wallet,
+                           self._stop_reason or STOP_CONVERGED)
+        if self._stop_reason == STOP_GUARDS:
+            out['guards'] = [
+                {k: g.get(k) for k in
+                 ('param', 'outcome', 'lo', 'hi', 'margin', 'now', 'held_by')}
+                for dial_blocks in self._guard_blocks.values()
+                for g in dial_blocks]
+            out['detail'] = ('the region closed: every placement would '
+                             'break a standing band (the guards carry '
+                             'the numbers)')
+        return out
 
     # ─── internals ──────────────────────────────────────────────────
 
@@ -210,6 +326,9 @@ class SeekDriver:
     def _end_of_round(self) -> bool:
         """Round seam: pay nothing, decide whether another round runs."""
         if self._plan.form == COVER_NOW:
+            if self._region_fully_guard_closed():
+                self._finish(STOP_GUARDS)
+                return True
             self._finish(STOP_REGION)
             return True
         if self._last_baseline is not None and \
@@ -224,6 +343,13 @@ class SeekDriver:
         self._dial_idx = 0
         self._measured = {d: [] for d in self._dials}  # fresh asks allowed
         return False
+
+    def _region_fully_guard_closed(self) -> bool:
+        """Every dial guard-closed with no pass measured anywhere: the
+        walk had no legal step left in its whole region."""
+        return (bool(self._guard_closed_dials)
+                and not self._pass_findings
+                and set(self._guard_closed_dials) >= set(self._dials))
 
     def _finish(self, reason: str) -> None:
         self._stop_reason = reason
