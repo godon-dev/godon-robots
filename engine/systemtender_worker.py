@@ -938,6 +938,21 @@ class SystemtenderWorker:
             logger.warning(f"Wish plan fetch failed for {wish_id}: {e}")
             return None
 
+    def _move_is_mine(self, move: Dict[str, Any], single: bool) -> bool:
+        """Is this plan move one of THIS tender's holds? Joint serving:
+        a multi-claim plan names every sender; each tender serves its
+        own moves and ignores the rest. The legacy single-move plan is
+        trusted as this tender's by construction (the assignment row
+        was planted on exactly the move's sender)."""
+        sender = move.get('sender')
+        if sender is None:
+            return single
+        mine = str(sender).replace('-', '_')
+        me = str(self.systemtender_id).replace('-', '_')
+        if mine == me:
+            return True
+        return single
+
     def _adopt_wish(self, wish_id: str, role: str = 'sender') -> None:
         plan = self._fetch_wish_plan(wish_id)
         if not plan:
@@ -948,9 +963,7 @@ class SystemtenderWorker:
             # never half-runs.
             self._adopt_seek_wish(wish_id, plan)
             return
-        moves = (plan.get('plan') or {}).get('moves') or [{}]
-        move = moves[0] if moves else {}
-        param, setting = move.get('param'), move.get('setting')
+        moves = (plan.get('plan') or {}).get('moves') or []
         path = (plan.get('plan') or {}).get('path') or []
 
         if role == 'receiver':
@@ -971,18 +984,30 @@ class SystemtenderWorker:
                 f"publishing readings for the judge"
             )
             return
-        if param is None or setting is None:
-            logger.warning(f"Wish {wish_id}: plan carries no move — staying put")
+        # Joint serving: every move naming this tender is a dial it
+        # holds; other senders' moves are theirs (their own assignment
+        # rows point them here too). One wish, many dials, one verdict.
+        own = [
+            (m.get('param'), m.get('setting'))
+            for m in moves
+            if self._move_is_mine(m, single=(len(moves) == 1))
+            and m.get('param') is not None
+            and m.get('setting') is not None
+        ]
+        if not own:
+            logger.warning(
+                f"Wish {wish_id}: plan names no move for this tender — "
+                f"staying put")
             return
         self._wish = {
             'wish_id': wish_id,
-            'param': param,
-            'setting': setting,
+            'moves': {p: s for p, s in own},
             'instruction': plan.get('instruction', 'hold'),
             'role': 'sender',
         }
+        dials = ', '.join(f'{p}={s}' for p, s in own)
         logger.info(
-            f"Wish {wish_id} adopted: holding {param} at {setting} "
+            f"Wish {wish_id} adopted: holding {len(own)} dial(s) ({dials}) "
             f"(instruction: {self._wish['instruction']})"
         )
         # Tell the receiver end: plant the row in ITS db with role
@@ -1175,14 +1200,22 @@ class SystemtenderWorker:
         if self._wish['instruction'] == 'release':
             self._release_wish(delete_assignment=True)
             return
-        move = ((plan.get('plan') or {}).get('moves') or [{}])[0]
-        if move.get('param') == self._wish['param'] and move.get('setting') is not None:
-            if move['setting'] != self._wish['setting']:
-                logger.info(
-                    f"Wish {self._wish['wish_id']} re-planned: "
-                    f"{self._wish['param']} {self._wish['setting']} -> {move['setting']}"
-                )
-                self._wish['setting'] = move['setting']
+        # Joint serving: re-read every move this tender holds. A
+        # re-plan may move any dial (or add one); each updates in
+        # place, the hold decision merges them all.
+        fresh_moves = (plan.get('plan') or {}).get('moves') or []
+        single = len(fresh_moves) == 1
+        held = self._wish.setdefault('moves', {})
+        for m in fresh_moves:
+            if (self._move_is_mine(m, single=single)
+                    and m.get('param') is not None
+                    and m.get('setting') is not None):
+                p, s = m['param'], m['setting']
+                if held.get(p) != s:
+                    logger.info(
+                        f"Wish {self._wish['wish_id']} re-planned: "
+                        f"{p} {held.get(p)} -> {s}")
+                    held[p] = s
         # the walk's next level: one per refresh, re-served until its
         # point lands (a parked walker would otherwise never probe again)
         probe = plan.get('probe')
@@ -1296,13 +1329,16 @@ class SystemtenderWorker:
                         decision['params'] = {**(decision.get('params') or {}),
                                               **baseline}
                     elif (self._wish and self._wish.get('instruction') == 'hold'
-                            and self._wish.get('param') is not None):
-                        # The wish outranks the walk: hold the planned value.
-                        # Base = the coordinator's hold params (or neutral),
-                        # with the planned setting merged onto its dial.
+                            and self._wish.get('moves')):
+                        # The wish outranks the walk: hold the planned
+                        # values. Base = the coordinator's hold params
+                        # (or neutral), with every planned setting
+                        # merged onto its dial — joint serving, one
+                        # wish may hold many dials.
                         base = decision.get('params') or self._compute_neutral_params() or {}
                         hold_params = dict(base)
-                        hold_params[self._wish['param']] = self._wish['setting']
+                        for p, s in (self._wish.get('moves') or {}).items():
+                            hold_params[p] = s
                         decision = {'mode': 'hold', 'params': hold_params}
                     elif self._wish and self._wish.get('instruction') == 'park':
                         # The receiver's role in a wish: stillness. Own
