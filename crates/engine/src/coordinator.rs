@@ -13,18 +13,26 @@
 //! integer seconds the python interpolated — constants, not user input.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use crate::coordinator_walk::{CharWalk, CoordHooks, CoordState, ParamBound, Probe, ProbeOverride};
 use crate::ledger::{retry_ladder, Connect, DbError, DsnConnect};
+use crate::walk_policy::HttpTransport;
 
 pub const WORST_CASE_TRIAL_SECONDS: i64 = 600;
 pub const STALE_SENDER_MULTIPLIER: i64 = 5;
 pub const MAX_HOLD_TRIALS: i64 = 200;
 pub const ACTIVE_SYSTEMTENDER_WINDOW_SECONDS: i64 = 360;
 
-/// The unified detection + characterization coordinator's room side.
+/// The unified detection + characterization coordinator: the room
+/// side (tables, census, lease machine) lives here; the
+/// walk/characterization half (its state fields are below, its
+/// behavior in [`crate::coordinator_walk`]) lands against these seams.
 pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     pub systemtender_id: String,
     pub group_id: String,
@@ -32,20 +40,80 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     pub pause_block_size: i64,
     pub cooldown_trials: i64,
     pub active_window: i64,
-    conn: C,
+    pub(crate) conn: C,
+    /// the whole config, kept for the walk half's re-reads (hold_params,
+    /// settings, walk_policy/walk_transport keys — python parity)
+    pub(crate) config: Value,
     /// the lease token held, read back on acquire (0 = none held; the
     /// python original's `_lease_token`, same lifecycle)
     pub lease_token: RefCell<i32>,
+    /// the worker's injected callbacks (the python constructor's
+    /// `collect_upper_bounds_fn` / `compute_neutral_params_fn`, plus
+    /// the rust replacement for the python tests' config-injected
+    /// walk transport callable)
+    pub hooks: CoordHooks,
+    /// the causal client — one transport behind the coordinator's own
+    /// adaptive-timeout calls and the notebook walk's fixed-2s views
+    pub http: Arc<dyn HttpTransport>,
+
+    // ── walk/characterization half state (the python object's own) ──
+    /// Characterization precision — the one customer-facing knob
+    /// (default 0.02, `convergence_threshold`).
+    pub convergence_threshold: f64,
+    /// Max recursive refinement insertions between two measured
+    /// points (default 3).
+    pub refinement_depth: i64,
+    pub causal_url: String,
+    /// Quantum: probe cycles one systemtender holds the lease before
+    /// yielding to a walk-pending peer (default 3; solo walkers never
+    /// yield — zero churn).
+    pub quantum_cycles: i64,
+    pub(crate) state: RefCell<CoordState>,
+    pub(crate) initialized: RefCell<bool>,
+    pub(crate) idle_count: RefCell<i64>,
+    pub(crate) push_count: RefCell<i64>,
+    pub(crate) pause_count: RefCell<i64>,
+    pub(crate) cooldown_count: RefCell<i64>,
+    pub(crate) hold_count: RefCell<i64>,
+    /// params retired by causal's two-key verdict
+    pub(crate) converged_params: RefCell<HashSet<String>>,
+    /// round timestamps for causal probe_result calls
+    pub(crate) round_push_start: RefCell<Option<DateTime<Utc>>>,
+    pub(crate) round_pause_end: RefCell<Option<DateTime<Utc>>>,
+    /// causal RTT history (seconds, rolling 10) and the system's own
+    /// trial-duration history — the adaptive timeout's two inputs
+    pub(crate) causal_rtt_history: RefCell<Vec<f64>>,
+    pub(crate) trial_duration_history: RefCell<Vec<f64>>,
+    /// the map's named ambience debt for THIS tender, memoized so
+    /// per-trial polls never hammer the notebook. None = not
+    /// consulted or the consult went dark (a dark view is not an
+    /// answer — never cached, never walked on).
+    pub(crate) ambience_debt_cache: RefCell<Option<(std::time::Instant, Vec<Value>)>>,
+    pub(crate) stretch_cycles: RefCell<i64>,
+    pub(crate) char_walk: RefCell<Option<CharWalk>>,
+    pub(crate) refinement_level: RefCell<i64>,
+    pub(crate) param_names: RefCell<Vec<String>>,
+    pub(crate) param_bounds: RefCell<BTreeMap<String, ParamBound>>,
+    pub(crate) current_probe: RefCell<Option<Probe>>,
+    pub(crate) neutral_params: RefCell<Option<serde_json::Map<String, Value>>>,
+    pub(crate) hold_params_from_config: RefCell<bool>,
+    pub(crate) probe_override: RefCell<Option<ProbeOverride>>,
+    pub(crate) last_observed_phase: RefCell<Option<String>>,
 }
 
 impl ProbeCoordinator<DsnConnect> {
-    pub fn new_dsn(systemtender_id: &str, config: &Value, dsn: &str) -> Result<Self, DbError> {
-        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?))
+    pub fn new_dsn(
+        systemtender_id: &str,
+        config: &Value,
+        hooks: CoordHooks,
+        dsn: &str,
+    ) -> Result<Self, DbError> {
+        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?, hooks))
     }
 }
 
 impl<C: Connect> ProbeCoordinator<C> {
-    pub fn new(systemtender_id: &str, config: &Value, conn: C) -> Self {
+    pub fn new(systemtender_id: &str, config: &Value, conn: C, hooks: CoordHooks) -> Self {
         let det = config
             .get("interference_detection")
             .or_else(|| config.get("detection"))
@@ -57,6 +125,12 @@ impl<C: Connect> ProbeCoordinator<C> {
             .and_then(|v| v.as_str())
             .unwrap_or("default")
             .to_string();
+        let causal_url = det
+            .get("causal_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("GODON_CAUSAL_URL").ok())
+            .unwrap_or_else(|| "http://godon-godon-causal:9091".to_string());
         ProbeCoordinator {
             systemtender_id: systemtender_id.to_string(),
             group_id,
@@ -77,7 +151,49 @@ impl<C: Connect> ProbeCoordinator<C> {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(ACTIVE_SYSTEMTENDER_WINDOW_SECONDS),
             conn,
+            config: config.clone(),
             lease_token: RefCell::new(0),
+            http: hooks
+                .http
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::walk_policy::ReqwestTransport)),
+            convergence_threshold: det
+                .get("convergence_threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.02),
+            refinement_depth: det
+                .get("refinement_depth")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3),
+            causal_url,
+            quantum_cycles: det
+                .get("quantum_cycles")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3),
+            hooks,
+            state: RefCell::new(CoordState::Idle),
+            initialized: RefCell::new(false),
+            idle_count: RefCell::new(0),
+            push_count: RefCell::new(0),
+            pause_count: RefCell::new(0),
+            cooldown_count: RefCell::new(0),
+            hold_count: RefCell::new(0),
+            converged_params: RefCell::new(HashSet::new()),
+            round_push_start: RefCell::new(None),
+            round_pause_end: RefCell::new(None),
+            causal_rtt_history: RefCell::new(Vec::new()),
+            trial_duration_history: RefCell::new(Vec::new()),
+            ambience_debt_cache: RefCell::new(None),
+            stretch_cycles: RefCell::new(0),
+            char_walk: RefCell::new(None),
+            refinement_level: RefCell::new(0),
+            param_names: RefCell::new(Vec::new()),
+            param_bounds: RefCell::new(BTreeMap::new()),
+            current_probe: RefCell::new(None),
+            neutral_params: RefCell::new(None),
+            hold_params_from_config: RefCell::new(false),
+            probe_override: RefCell::new(None),
+            last_observed_phase: RefCell::new(None),
         }
     }
 
@@ -85,7 +201,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         STALE_SENDER_MULTIPLIER * WORST_CASE_TRIAL_SECONDS
     }
 
-    fn exec<T>(
+    pub(crate) fn exec<T>(
         &self,
         mut op: impl FnMut(&mut postgres::Transaction<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
@@ -464,14 +580,20 @@ impl<C: Connect> ProbeCoordinator<C> {
             n + 3
         );
         let phase = phase.to_string();
+        // the budget columns are INT — psycopg2 sent python ints; the
+        // i64 seam wrote nothing (swallowed warning) until the walk
+        // half's state-machine tests asserted the phase write
+        // (receipt: CI run 38938181276)
+        let push_b = push_budget.map(|v| v as i32);
+        let pause_b = pause_budget.map(|v| v as i32);
         if let Err(e) = self.exec(|txn| {
             let token = *self.lease_token.borrow();
             let mut params: Vec<&(dyn postgres::types::ToSql + std::marker::Sync)> =
                 vec![&phase as &(dyn postgres::types::ToSql + std::marker::Sync)];
-            if let Some(p) = push_budget.as_ref() {
+            if let Some(p) = push_b.as_ref() {
                 params.push(p);
             }
-            if let Some(p) = pause_budget.as_ref() {
+            if let Some(p) = pause_b.as_ref() {
                 params.push(p);
             }
             params.push(&self.group_id);
@@ -525,6 +647,108 @@ impl<C: Connect> ProbeCoordinator<C> {
         }) {
             eprintln!("Presence refresh failed: {e}");
         }
+    }
+
+    /// Is a live sender holding the lease? A lease is live only while
+    /// its HOLDER is: a worker that died mid-walk leaves the row held
+    /// with a fresh-looking heartbeat clock for the whole staleness
+    /// window, and its lost token means even its own restart cannot
+    /// reclaim — the holder's census row is the death detector.
+    /// On failure: false (the python degrades and logs LOUD).
+    pub fn has_active_sender(&self) -> bool {
+        let stale = self.stale_interval();
+        let window = self.active_window;
+        let sql = format!(
+            "SELECT count(*) FROM sender_lease \
+             WHERE group_id = $1 AND holder IS NOT NULL \
+             AND last_heartbeat IS NOT NULL \
+             AND last_heartbeat > NOW() - INTERVAL '{stale} seconds' \
+             AND EXISTS (\
+             SELECT 1 FROM interference_active_systemtenders h \
+             WHERE h.systemtender_id = sender_lease.holder \
+             AND h.group_id = $2 \
+             AND h.last_seen > NOW() - INTERVAL '{window} seconds')"
+        );
+        self.exec(|txn| {
+            let row = txn.query_one(
+                &sql,
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.group_id,
+                ],
+            )?;
+            Ok(row.get::<_, i64>(0) > 0)
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "COORDINATION DB FAILURE (has_active_sender): {e} — degrading, probe protocol compromised"
+            );
+            false
+        })
+    }
+
+    /// The live holder's phase — same liveness rule as
+    /// [`Self::has_active_sender`]: a dead holder's phase must not
+    /// gate receivers either. On failure: None.
+    pub fn get_lease_phase(&self) -> Option<String> {
+        let stale = self.stale_interval();
+        let window = self.active_window;
+        let sql = format!(
+            "SELECT phase FROM sender_lease \
+             WHERE group_id = $1 AND holder IS NOT NULL \
+             AND last_heartbeat IS NOT NULL \
+             AND last_heartbeat > NOW() - INTERVAL '{stale} seconds' \
+             AND EXISTS (\
+             SELECT 1 FROM interference_active_systemtenders h \
+             WHERE h.systemtender_id = sender_lease.holder \
+             AND h.group_id = $2 \
+             AND h.last_seen > NOW() - INTERVAL '{window} seconds')"
+        );
+        self.exec(|txn| {
+            let row = txn.query_opt(
+                &sql,
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.group_id,
+                ],
+            )?;
+            Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "COORDINATION DB FAILURE (get_lease_phase): {e} — degrading, probe protocol compromised"
+            );
+            None
+        })
+    }
+
+    /// Live census count for this group (ourselves included). On
+    /// failure: 1 — assume solo (if peers exist, coordination is
+    /// LOST; the log says so, the python default stands).
+    pub fn count_active_systemtenders(&self) -> i64 {
+        let window = self.active_window;
+        let sql = format!(
+            "SELECT COUNT(*) FROM interference_active_systemtenders \
+             WHERE group_id = $1 AND last_seen > NOW() - INTERVAL '{window} seconds'"
+        );
+        self.exec(|txn| {
+            let row = txn.query_one(
+                &sql,
+                &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )?;
+            Ok(row.get::<_, i64>(0))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "COORDINATION DB FAILURE (count_active_systemtenders): {e} — assuming solo; if peers exist, coordination is LOST"
+            );
+            1
+        })
+    }
+
+    /// The walk half's current state (the python `get_state`).
+    pub fn get_state(&self) -> CoordState {
+        *self.state.borrow()
     }
 }
 
@@ -595,7 +819,7 @@ pub fn register_interference_systemtender<C: Connect>(
 }
 
 #[cfg(test)]
-mod db_tests {
+pub(crate) mod db_tests {
     use super::*;
     use crate::ledger::DsnConnect;
 
@@ -608,13 +832,17 @@ mod db_tests {
     /// The room tests share one postgres and each rebuilds the room:
     /// concurrent DROP/CREATE trips postgres's catalog race
     /// (pg_type duplicate), so the room is serial.
-    static ROOM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ROOM: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn lock_room() -> std::sync::MutexGuard<'static, ()> {
         ROOM.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn fresh_room(dsn: &str) -> (ProbeCoordinator<DsnConnect>, ProbeCoordinator<DsnConnect>) {
+        fn hooks() -> crate::coordinator_walk::CoordHooks {
+            // room tests never touch the walk half — empty collector
+            crate::coordinator_walk::CoordHooks::new(std::sync::Arc::new(|_| vec![]))
+        }
         let mut client = postgres::Client::connect(dsn, postgres::NoTls).unwrap();
         for t in [
             "sender_lease",
@@ -626,8 +854,8 @@ mod db_tests {
         }
         drop(client);
         let cfg = serde_json::json!({"detection": {"group": "rung10"}});
-        let a = ProbeCoordinator::new_dsn("tender-a", &cfg, dsn).unwrap();
-        let b = ProbeCoordinator::new_dsn("tender-b", &cfg, dsn).unwrap();
+        let a = ProbeCoordinator::new_dsn("tender-a", &cfg, hooks(), dsn).unwrap();
+        let b = ProbeCoordinator::new_dsn("tender-b", &cfg, hooks(), dsn).unwrap();
         a.ensure_tables().unwrap();
         register_interference_systemtender(&DsnConnect::new(dsn).unwrap(), "tender-a", "rung10")
             .unwrap();
