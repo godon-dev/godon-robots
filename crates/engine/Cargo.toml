@@ -24,3 +24,9 @@ sha2 = "0.10"
 # (http://godon-godon-causal:9091); an https URL would surface as a
 # dark call, never a silent downgrade.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+# The strain family crates — compiled in per the purpose-profile
+# ruling; the engine's boot-time load_strain check rides them.
+strain_bench_generic = { package = "godon-strain-bench-generic", path = "../strain-bench-generic" }
+strain_bench_greenhouse = { package = "godon-strain-bench-greenhouse", path = "../strain-bench-greenhouse" }
+strain_bench_microgrid = { package = "godon-strain-bench-microgrid", path = "../strain-bench-microgrid" }
+strain_linux_performance = { package = "godon-strain-linux-performance", path = "../strain-linux-performance" }

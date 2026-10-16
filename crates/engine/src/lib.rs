@@ -28,6 +28,7 @@ pub mod metrics;
 pub mod seek;
 pub mod seek_driver;
 pub mod seek_policy;
+pub mod strains;
 pub mod walk_policy;
 pub mod worker;
 pub mod worker_loop;

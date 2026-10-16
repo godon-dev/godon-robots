@@ -15,6 +15,10 @@ use crate::ledger::TrialLedger;
 pub enum WorkerError {
     MissingCreationTs,
     BadCreationTs(String),
+    /// unknown strain type — `load_strain`'s ValueError, raised at
+    /// boot between the group read and the creation_ts check
+    /// (python's own ordering, so it wins when both are wrong)
+    UnknownStrain(String),
     /// ledger/schema init failure (python let psycopg2's own exception
     /// out of __init__; the typed rust surface names it here)
     Init(String),
@@ -29,6 +33,7 @@ impl std::fmt::Display for WorkerError {
             WorkerError::BadCreationTs(s) => {
                 write!(f, "unparseable creation_ts: {s}")
             }
+            WorkerError::UnknownStrain(msg) => write!(f, "{msg}"),
             WorkerError::Init(s) => write!(f, "worker init failed: {s}"),
         }
     }
@@ -95,6 +100,13 @@ impl WorkerConfig {
             .and_then(|v| v.as_str())
             .unwrap_or("default")
             .to_string();
+
+        // python: strain_type = systemtender_config.get('type',
+        // 'linux_performance'); self.strain = load_strain(strain_type)
+        // — the boot-time refusal on unknown families sits BETWEEN the
+        // group read and the creation_ts check, python's own order.
+        let strain_type = crate::strains::strain_type_of(&st);
+        crate::strains::load_strain(&strain_type).map_err(WorkerError::UnknownStrain)?;
 
         let creation_raw = config
             .get("creation_ts")
@@ -256,6 +268,31 @@ mod tests {
             err.to_string(),
             "Required field 'creation_ts' missing from config"
         );
+    }
+
+    #[test]
+    fn unknown_strain_type_is_the_loader_error() {
+        let err = WorkerConfig::from_value(&json!({
+            "systemtender": {"type": "nonexistent_strain"},
+            "creation_ts": "2026-10-10T12:00:00+00:00"
+        }))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unknown strain type: 'nonexistent_strain'. Available: \
+             linux_performance, bench_greenhouse, bench_microgrid, bench_generic"
+        );
+    }
+
+    #[test]
+    fn unknown_strain_wins_over_missing_creation_ts() {
+        // python raised load_strain BEFORE the creation_ts check —
+        // both wrong means the strain error surfaces
+        let err = WorkerConfig::from_value(&json!({
+            "systemtender": {"type": "nonexistent_strain"}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().starts_with("Unknown strain type"));
     }
 
     #[test]

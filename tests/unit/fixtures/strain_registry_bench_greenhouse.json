@@ -1,0 +1,95 @@
+{
+ "entries": [
+  [
+   "heating_setpoints",
+   {
+    "causes_downtime": false,
+    "description": "Target temperature per zone (Celsius)",
+    "scope": "per_zone",
+    "type": "float",
+    "typical_range": [
+     5.0,
+     40.0
+    ]
+   }
+  ],
+  [
+   "vent_openings",
+   {
+    "causes_downtime": false,
+    "description": "Ventilation opening fraction per zone (0.0-1.0)",
+    "scope": "per_zone",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     1.0
+    ]
+   }
+  ],
+  [
+   "shading",
+   {
+    "causes_downtime": false,
+    "description": "Shading coefficient (0.0-1.0)",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     1.0
+    ]
+   }
+  ],
+  [
+   "co2_injection",
+   {
+    "causes_downtime": false,
+    "description": "CO2 injection rate",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     20.0
+    ]
+   }
+  ],
+  [
+   "light_intensity",
+   {
+    "causes_downtime": false,
+    "description": "Supplemental light intensity",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     1000.0
+    ]
+   }
+  ],
+  [
+   "irrigation",
+   {
+    "causes_downtime": false,
+    "description": "Irrigation rate (0.0-3.0)",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     3.0
+    ]
+   }
+  ],
+  [
+   "sim_steps",
+   {
+    "causes_downtime": false,
+    "description": "Simulation steps per trial",
+    "scope": "global",
+    "type": "int",
+    "typical_range": [
+     10,
+     200
+    ]
+   }
+  ]
+ ]
+}
