@@ -580,14 +580,20 @@ impl<C: Connect> ProbeCoordinator<C> {
             n + 3
         );
         let phase = phase.to_string();
+        // the budget columns are INT — psycopg2 sent python ints; the
+        // i64 seam wrote nothing (swallowed warning) until the walk
+        // half's state-machine tests asserted the phase write
+        // (receipt: CI run 38938181276)
+        let push_b = push_budget.map(|v| v as i32);
+        let pause_b = pause_budget.map(|v| v as i32);
         if let Err(e) = self.exec(|txn| {
             let token = *self.lease_token.borrow();
             let mut params: Vec<&(dyn postgres::types::ToSql + std::marker::Sync)> =
                 vec![&phase as &(dyn postgres::types::ToSql + std::marker::Sync)];
-            if let Some(p) = push_budget.as_ref() {
+            if let Some(p) = push_b.as_ref() {
                 params.push(p);
             }
-            if let Some(p) = pause_budget.as_ref() {
+            if let Some(p) = pause_b.as_ref() {
                 params.push(p);
             }
             params.push(&self.group_id);

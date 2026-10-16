@@ -460,6 +460,9 @@ impl<C: Connect> ProbeCoordinator<C> {
         lease_phase: Option<&str>,
     ) {
         let obj = Value::Object(objective_values.clone());
+        // trial_num is an INT column (psycopg2 sent python ints); a
+        // trial number past 2^31 fails the insert loudly, never silently
+        let trial_num: i32 = trial_num as i32;
         if let Err(e) = self.exec(|txn| {
             txn.execute(
                 "INSERT INTO receiver_observations \
@@ -2466,16 +2469,17 @@ mod room_walk_tests {
         assert!(a.converged_params.borrow().contains("param_0"));
 
         // t7: back in PUSH, ask finds nothing → ambience empty → DONE
+        // (the DONE handler parks and lands in COOLDOWN, python shape)
         let d = a.decide_trial(7).unwrap();
-        assert_eq!(a.get_state(), CoordState::Done);
+        assert_eq!(a.get_state(), CoordState::Cooldown);
         assert_eq!(d.mode, "hold"); // done parks at neutral
         assert!(!d.detection_trial);
         assert_eq!(d.params.as_ref().unwrap()["param_0"], json!(50.0));
         assert_eq!(holder(&dsn), None); // released
 
-        // t8: cooldown done (1 trial) → IDLE
+        // t8: cooldown spent (1 trial) → back to IDLE same trial
         let _ = a.decide_trial(8).unwrap();
-        assert_eq!(a.get_state(), CoordState::Cooldown);
+        assert_eq!(a.get_state(), CoordState::Idle);
 
         // t9: IDLE — finished walk never re-acquires; demand=false
         let d = a.decide_trial(9).unwrap();
@@ -2600,9 +2604,11 @@ mod room_walk_tests {
             "UPDATE sender_lease SET holder = 'tender-b', phase = 'hold', \
              last_heartbeat = NOW()",
         );
-        *a.hold_count.borrow_mut() = MAX_HOLD_TRIALS; // one trial from the cap
+        // the Idle→Hold entry resets the hold counter — seed AFTER the
+        // first decide so the cap is one trial away
         let _ = a.decide_trial(1).unwrap();
         assert_eq!(a.get_state(), CoordState::Hold);
+        *a.hold_count.borrow_mut() = MAX_HOLD_TRIALS;
         let _ = a.decide_trial(2).unwrap();
         assert_eq!(a.get_state(), CoordState::Idle);
     }
