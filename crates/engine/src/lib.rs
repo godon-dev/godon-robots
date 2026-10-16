@@ -20,4 +20,5 @@
 //! not shared code. Fixture parity is byte-exact, never approximate.
 
 pub mod ledger;
+pub mod coordinator;
 pub mod worker;

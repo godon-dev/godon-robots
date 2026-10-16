@@ -1,0 +1,760 @@
+//! The probe coordinator's room machinery — the port of
+//! `probe_coordinator.py`'s shared-database layer: the room tables,
+//! the census, and the sender-lease machine. The walk/characterization
+//! half of the coordinator lands in its own slice against these seams.
+//!
+//! The room's DB layer is deliberately forgiving, exactly like the
+//! python original: room machinery must never crash a walker — ops the
+//! python side swallows into a warning return their python defaults
+//! here (demand/presence/cleanup: ignored; pending-peers: empty;
+//! live-peer-count: 1, assume contention; acquire: false). The
+//! deliberate defaults and guards carry their receipts in comments.
+//! Interval literals are interpolated into the SQL text with the same
+//! integer seconds the python interpolated — constants, not user input.
+
+use std::cell::RefCell;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::ledger::{retry_ladder, Connect, DbError, DsnConnect};
+
+pub const WORST_CASE_TRIAL_SECONDS: i64 = 600;
+pub const STALE_SENDER_MULTIPLIER: i64 = 5;
+pub const MAX_HOLD_TRIALS: i64 = 200;
+pub const ACTIVE_SYSTEMTENDER_WINDOW_SECONDS: i64 = 360;
+
+/// The unified detection + characterization coordinator's room side.
+pub struct ProbeCoordinator<C: Connect = DsnConnect> {
+    pub systemtender_id: String,
+    pub group_id: String,
+    pub push_block_size: i64,
+    pub pause_block_size: i64,
+    pub cooldown_trials: i64,
+    pub active_window: i64,
+    conn: C,
+    /// the lease token held, read back on acquire (0 = none held; the
+    /// python original's `_lease_token`, same lifecycle)
+    pub lease_token: RefCell<i32>,
+}
+
+impl ProbeCoordinator<DsnConnect> {
+    pub fn new_dsn(systemtender_id: &str, config: &Value, dsn: &str) -> Result<Self, DbError> {
+        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?))
+    }
+}
+
+impl<C: Connect> ProbeCoordinator<C> {
+    pub fn new(systemtender_id: &str, config: &Value, conn: C) -> Self {
+        let det = config
+            .get("interference_detection")
+            .or_else(|| config.get("detection"))
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let group_id = det
+            .get("group")
+            .or_else(|| config.get("group"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        ProbeCoordinator {
+            systemtender_id: systemtender_id.to_string(),
+            group_id,
+            push_block_size: det
+                .get("push_block_size")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10),
+            pause_block_size: det
+                .get("pause_block_size")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10),
+            cooldown_trials: det
+                .get("cooldown_trials")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(5),
+            active_window: det
+                .get("active_systemtender_window")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(ACTIVE_SYSTEMTENDER_WINDOW_SECONDS),
+            conn,
+            lease_token: RefCell::new(0),
+        }
+    }
+
+    pub fn stale_interval(&self) -> i64 {
+        STALE_SENDER_MULTIPLIER * WORST_CASE_TRIAL_SECONDS
+    }
+
+    fn exec<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Transaction<'_>) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let mut sleeper = |s: f64| std::thread::sleep(Duration::from_secs_f64(s));
+        retry_ladder(&mut sleeper, || {
+            let mut client = self.conn.connect()?;
+            let mut txn = client.transaction().map_err(DbError::from)?;
+            let out = op(&mut txn)?;
+            txn.commit().map_err(DbError::from)?;
+            Ok(out)
+        })
+    }
+
+    pub fn ensure_tables(&self) -> Result<(), DbError> {
+        self.exec(|txn| {
+            // legacy singleton → group-scoped migration (drop if the
+            // old shape is present)
+            let legacy = txn.query_opt(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_name = 'sender_lease' AND column_name = 'id'",
+                &[],
+            )?;
+            if legacy.is_some() {
+                txn.execute("DROP TABLE sender_lease", &[])?;
+            }
+            txn.execute(
+                "CREATE TABLE IF NOT EXISTS sender_lease (\
+                 group_id VARCHAR(255) PRIMARY KEY, \
+                 holder VARCHAR(255), \
+                 token INT DEFAULT 0, \
+                 phase VARCHAR(50), \
+                 push_remaining INT DEFAULT 0, \
+                 pause_remaining INT DEFAULT 0, \
+                 last_heartbeat TIMESTAMPTZ)",
+                &[],
+            )?;
+            txn.execute(
+                "INSERT INTO sender_lease \
+                 (group_id, holder, token, phase, push_remaining, pause_remaining, last_heartbeat) \
+                 VALUES ($1, NULL, 0, NULL, 0, 0, NULL) ON CONFLICT (group_id) DO NOTHING",
+                &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )?;
+            txn.execute(
+                "CREATE TABLE IF NOT EXISTS detection_readiness (\
+                 systemtender_id VARCHAR(255) PRIMARY KEY, \
+                 group_id VARCHAR(255) NOT NULL DEFAULT 'default', \
+                 ready_for VARCHAR(50) NOT NULL, \
+                 ready_at TIMESTAMPTZ DEFAULT NOW())",
+                &[],
+            )?;
+            let has_group = txn.query_opt(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_name = 'detection_readiness' AND column_name = 'group_id'",
+                &[],
+            )?;
+            if has_group.is_none() {
+                txn.execute(
+                    "ALTER TABLE detection_readiness \
+                     ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'",
+                    &[],
+                )?;
+            }
+            // Receiver observations — written by receiver during HOLD,
+            // read by sender to compute coupling shift after each
+            // probe round.
+            txn.execute(
+                "CREATE TABLE IF NOT EXISTS receiver_observations (\
+                 id SERIAL PRIMARY KEY, \
+                 group_id VARCHAR(255) NOT NULL, \
+                 receiver_id VARCHAR(255) NOT NULL, \
+                 trial_num INT, \
+                 objective_values JSONB, \
+                 lease_phase VARCHAR(50), \
+                 written_at TIMESTAMPTZ DEFAULT NOW())",
+                &[],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn cleanup_stale_state(&self) {
+        let stale = self.stale_interval();
+        let sql = format!(
+            "UPDATE sender_lease \
+             SET holder = NULL, phase = NULL, \
+             push_remaining = 0, pause_remaining = 0 \
+             WHERE group_id = $1 AND holder IS NOT NULL \
+             AND (last_heartbeat IS NULL \
+             OR last_heartbeat < NOW() - INTERVAL '{stale} seconds')"
+        );
+        if let Err(e) = self.exec(|txn| {
+            txn.execute(&sql, &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)])
+                .map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Failed to cleanup stale state: {e}");
+            return;
+        }
+        if let Err(e) = self.exec(|txn| {
+            txn.execute(
+                "DELETE FROM detection_readiness \
+                 WHERE ready_at < NOW() - INTERVAL '10 minutes'",
+                &[],
+            )
+            .map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Failed to cleanup stale state: {e}");
+        }
+    }
+
+    /// Publish (or clear) this systemtender's walk-demand flag.
+    pub fn publish_demand(&self, want: bool) {
+        if let Err(e) = self.exec(|txn| {
+            txn.execute(
+                "UPDATE interference_active_systemtenders \
+                 SET walk_pending = $1, last_seen = NOW() \
+                 WHERE systemtender_id = $2",
+                &[&want as &(dyn postgres::types::ToSql + std::marker::Sync), &self.systemtender_id],
+            )
+            .map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Failed to publish demand: {e}");
+        }
+    }
+
+    /// Live group members (other than us) that want to walk. On
+    /// failure: assume none (the python default).
+    pub fn walk_pending_peers(&self) -> Vec<String> {
+        let window = self.active_window;
+        let sql = format!(
+            "SELECT systemtender_id FROM interference_active_systemtenders \
+             WHERE group_id = $1 AND systemtender_id <> $2 \
+             AND last_seen > NOW() - INTERVAL '{window} seconds' \
+             AND walk_pending IS TRUE"
+        );
+        self.exec(|txn| {
+            let rows = txn.query(
+                &sql,
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                ],
+            )?;
+            Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("walk_pending_peers query failed ({e}) — assuming none");
+            Vec::new()
+        })
+    }
+
+    /// Contention check: does another live member want the mic?
+    pub fn peer_walk_pending(&self) -> bool {
+        !self.walk_pending_peers().is_empty()
+    }
+
+    /// Live group members other than us — regardless of demand: peers
+    /// in HOLD behind an active sender cannot publish walk_pending, so
+    /// their EXISTENCE is the only signal the holder's yield check can
+    /// rely on. On failure: assume contention (python default 1).
+    pub fn live_peer_count(&self) -> i64 {
+        let window = self.active_window;
+        let sql = format!(
+            "SELECT COUNT(*) FROM interference_active_systemtenders \
+             WHERE group_id = $1 AND systemtender_id <> $2 \
+             AND last_seen > NOW() - INTERVAL '{window} seconds'"
+        );
+        self.exec(|txn| {
+            let row = txn.query_one(
+                &sql,
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                ],
+            )?;
+            Ok(row.get::<_, i64>(0))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("live_peer_count query failed ({e}) — assuming contention");
+            1
+        })
+    }
+
+    /// Acquire the sender lease under fair-share turn taking: publish
+    /// demand, then acquire only while no walk-pending live peer has
+    /// had fewer lease turns, and only once every live peer has parked
+    /// (params IS NOT NULL — benches boot at param_lower; a window
+    /// opened before a peer's first park banks that ambient as our
+    /// effect; receipt run 36393481120). Poll speed cannot beat the
+    /// count: a starved peer always outranks a recently served one.
+    /// On failure or denial: false (a silent denial is invisible — the
+    /// block is named in the log; receipt seed-47, ~2090 denials with
+    /// zero log lines).
+    pub fn try_acquire_lease(&self, phase: &str) -> bool {
+        let want = self.peer_walk_pending();
+        let stale = self.stale_interval();
+        let window = self.active_window;
+        let sql = format!(
+            "UPDATE sender_lease \
+             SET holder = $1, token = token + 1, phase = $2, \
+             push_remaining = 0, pause_remaining = 0, \
+             last_heartbeat = NOW() \
+             WHERE group_id = $3 AND (\
+             holder IS NULL \
+             OR last_heartbeat IS NULL \
+             OR last_heartbeat < NOW() - INTERVAL '{stale} seconds' \
+             OR NOT EXISTS (\
+             SELECT 1 FROM interference_active_systemtenders h \
+             WHERE h.systemtender_id = sender_lease.holder \
+             AND h.group_id = $4 \
+             AND h.last_seen > NOW() - INTERVAL '{window} seconds')) \
+             AND NOT EXISTS (\
+             SELECT 1 FROM interference_active_systemtenders p \
+             WHERE p.group_id = $5 AND p.systemtender_id <> $6 \
+             AND p.last_seen > NOW() - INTERVAL '{window} seconds' \
+             AND p.walk_pending IS TRUE \
+             AND COALESCE(p.acquire_count, 0) < COALESCE((\
+             SELECT acquire_count FROM interference_active_systemtenders \
+             WHERE group_id = $7 AND systemtender_id = $8), 0)) \
+             AND NOT EXISTS (\
+             SELECT 1 FROM interference_active_systemtenders u \
+             WHERE u.group_id = $9 AND u.systemtender_id <> $10 \
+             AND u.last_seen > NOW() - INTERVAL '{window} seconds' \
+             AND u.params IS NULL)"
+        );
+        self.exec(|txn| {
+            // Publish demand (I am a candidate while my walk has work).
+            txn.execute(
+                "UPDATE interference_active_systemtenders \
+                 SET walk_pending = $1, last_seen = NOW() \
+                 WHERE systemtender_id = $2",
+                &[&want as &(dyn postgres::types::ToSql + std::marker::Sync), &self.systemtender_id],
+            )?;
+            let updated = txn.execute(
+                &sql,
+                &[
+                    &self.systemtender_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &phase,
+                    &self.group_id,
+                    &self.group_id,
+                    &self.group_id,
+                    &self.systemtender_id,
+                    &self.group_id,
+                    &self.systemtender_id,
+                    &self.group_id,
+                    &self.systemtender_id,
+                ],
+            )?;
+            if updated == 0 {
+                // name the block (the seed-47 receipt)
+                let lease = txn.query_opt(
+                    "SELECT holder, EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::FLOAT8 \
+                     FROM sender_lease WHERE group_id = $1",
+                    &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+                )?;
+                let unparked_sql = format!(
+                    "SELECT systemtender_id FROM interference_active_systemtenders \
+                     WHERE group_id = $1 AND systemtender_id <> $2 \
+                     AND last_seen > NOW() - INTERVAL '{window} seconds' \
+                     AND params IS NULL"
+                );
+                let unparked = txn.query(
+                    &unparked_sql,
+                    &[
+                        &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                        &self.systemtender_id,
+                    ],
+                )?;
+                let pending = txn.query(
+                    "SELECT systemtender_id FROM interference_active_systemtenders \
+                     WHERE group_id = $1 AND systemtender_id <> $2 \
+                     AND walk_pending IS TRUE",
+                    &[
+                        &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                        &self.systemtender_id,
+                    ],
+                )?;
+                let unparked_ids: Vec<String> =
+                    unparked.iter().map(|r| r.get::<_, String>(0)).collect();
+                let pending_ids: Vec<String> =
+                    pending.iter().map(|r| r.get::<_, String>(0)).collect();
+                eprintln!(
+                    "Lease acquire denied for {} (phase={}): holder={:?} \
+                     heartbeat_age={:?} unparked_peers={:?} walk_pending_peers={:?}",
+                    self.systemtender_id,
+                    phase,
+                    lease.as_ref().map(|r| r.get::<_, Option<String>>(0)),
+                    lease
+                        .as_ref()
+                        .and_then(|r| r.get::<_, Option<f64>>(1))
+                        .map(|v| v as i64),
+                    unparked_ids,
+                    pending_ids,
+                );
+                return Ok(false);
+            }
+            let row = txn.query_one(
+                "SELECT token FROM sender_lease WHERE group_id = $1",
+                &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )?;
+            *self.lease_token.borrow_mut() = row.get(0);
+            txn.execute(
+                "UPDATE interference_active_systemtenders \
+                 SET acquire_count = COALESCE(acquire_count, 0) + 1 \
+                 WHERE systemtender_id = $1",
+                &[&self.systemtender_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )?;
+            Ok(true)
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to acquire lease: {e}");
+            false
+        })
+    }
+
+    pub fn heartbeat(&self) -> bool {
+        self.exec(|txn| {
+            let n = txn.execute(
+                "UPDATE sender_lease SET last_heartbeat = NOW() \
+                 WHERE group_id = $1 AND holder = $2 AND token = $3",
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                    &*self.lease_token.borrow(),
+                ],
+            )?;
+            Ok(n > 0)
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("Heartbeat failed: {e}");
+            false
+        })
+    }
+
+    pub fn release_lease(&self) {
+        let token = *self.lease_token.borrow();
+        let res = self.exec(|txn| {
+            txn.execute(
+                "UPDATE sender_lease \
+                 SET holder = NULL, phase = NULL, \
+                 push_remaining = 0, pause_remaining = 0 \
+                 WHERE group_id = $1 AND holder = $2 AND token = $3",
+                &[
+                    &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                    &token,
+                ],
+            )
+            .map(|_| ()).map_err(DbError::from)
+        });
+        match res {
+            Ok(()) => eprintln!("Released sender lease (token={token})"),
+            Err(e) => eprintln!("Failed to release lease: {e}"),
+        }
+    }
+
+    /// Set the lease phase, optionally resetting the push/pause
+    /// budgets — the python built its SET list dynamically; same
+    /// shape, bound parameters.
+    pub fn set_lease_phase(&self, phase: &str, push_budget: Option<i64>, pause_budget: Option<i64>) {
+        let mut sets = vec!["phase = $1".to_string()];
+        let mut n = 1;
+        if push_budget.is_some() {
+            n += 1;
+            sets.push(format!("push_remaining = ${n}"));
+        }
+        if pause_budget.is_some() {
+            n += 1;
+            sets.push(format!("pause_remaining = ${n}"));
+        }
+        let sql = format!(
+            "UPDATE sender_lease SET {} \
+             WHERE group_id = ${} AND holder = ${} AND token = ${}",
+            sets.join(", "),
+            n + 1,
+            n + 2,
+            n + 3
+        );
+        let phase = phase.to_string();
+        if let Err(e) = self.exec(|txn| {
+            let token = *self.lease_token.borrow();
+            let mut params: Vec<&(dyn postgres::types::ToSql + std::marker::Sync)> =
+                vec![&phase as &(dyn postgres::types::ToSql + std::marker::Sync)];
+            if let Some(p) = push_budget.as_ref() {
+                params.push(p);
+            }
+            if let Some(p) = pause_budget.as_ref() {
+                params.push(p);
+            }
+            params.push(&self.group_id);
+            params.push(&self.systemtender_id);
+            params.push(&token);
+            txn.execute(&sql, &params[..]).map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Failed to set lease phase: {e}");
+        }
+    }
+
+    pub fn decrement_budget(&self, phase: &str, is_push: bool) {
+        let col = if is_push { "push_remaining" } else { "pause_remaining" };
+        let sql = format!(
+            "UPDATE sender_lease SET phase = $1, \
+             {col} = GREATEST({col} - 1, 0) \
+             WHERE group_id = $2 AND holder = $3 AND token = $4"
+        );
+        let phase = phase.to_string();
+        if let Err(e) = self.exec(|txn| {
+            let token = *self.lease_token.borrow();
+            txn.execute(
+                &sql,
+                &[
+                    &phase as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.group_id,
+                    &self.systemtender_id,
+                    &token,
+                ],
+            )
+            .map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Failed to decrement budget: {e}");
+        }
+    }
+
+    /// Keep this member's census row alive while parked. HOLD trials
+    /// touch nothing; a member that stops refreshing while alive
+    /// starves the group's own count and the rota freezes (receipt run
+    /// 35206141133). Presence only — the demand flag stays whatever
+    /// the walk last published.
+    pub fn refresh_presence(&self) {
+        if let Err(e) = self.exec(|txn| {
+            txn.execute(
+                "UPDATE interference_active_systemtenders \
+                 SET last_seen = NOW() \
+                 WHERE systemtender_id = $1",
+                &[&self.systemtender_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )
+            .map(|_| ()).map_err(DbError::from)
+        }) {
+            eprintln!("Presence refresh failed: {e}");
+        }
+    }
+}
+
+/// The census registration — worker-owned in the python original
+/// (`_register_interference_systemtender`), housed here until the
+/// worker's shared-db slice lands. Same DDL, same upsert.
+pub fn register_interference_systemtender<C: Connect>(
+    conn: &C,
+    systemtender_id: &str,
+    group_id: &str,
+) -> Result<(), DbError> {
+    let mut sleeper = |s: f64| std::thread::sleep(Duration::from_secs_f64(s));
+    retry_ladder(&mut sleeper, || {
+        let mut client = conn.connect()?;
+        let mut txn = client.transaction().map_err(DbError::from)?;
+        txn.execute(
+            "CREATE TABLE IF NOT EXISTS interference_active_systemtenders (\
+             systemtender_id VARCHAR(255) PRIMARY KEY, \
+             group_id VARCHAR(255) NOT NULL DEFAULT 'default', \
+             last_seen TIMESTAMPTZ DEFAULT NOW())",
+            &[],
+        )?;
+        let has_group = txn.query_opt(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_name = 'interference_active_systemtenders' \
+             AND column_name = 'group_id'",
+            &[],
+        )?;
+        if has_group.is_none() {
+            txn.execute(
+                "ALTER TABLE interference_active_systemtenders \
+                 ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'",
+                &[],
+            )?;
+        }
+        // Lease fairness bookkeeping: walk_pending declares demand;
+        // acquire_count records turns held.
+        txn.execute(
+            "ALTER TABLE interference_active_systemtenders \
+             ADD COLUMN IF NOT EXISTS walk_pending BOOLEAN",
+            &[],
+        )?;
+        txn.execute(
+            "ALTER TABLE interference_active_systemtenders \
+             ADD COLUMN IF NOT EXISTS acquire_count INT DEFAULT 0",
+            &[],
+        )?;
+        // Standing dials: this systemtender's applied params — read by
+        // causal to stamp curve points with the ambient they were
+        // measured under.
+        txn.execute(
+            "ALTER TABLE interference_active_systemtenders \
+             ADD COLUMN IF NOT EXISTS params JSONB",
+            &[],
+        )?;
+        txn.execute(
+            "INSERT INTO interference_active_systemtenders (systemtender_id, group_id, last_seen) \
+             VALUES ($1, $2, NOW()) ON CONFLICT (systemtender_id) DO UPDATE \
+             SET group_id = $2, last_seen = NOW()",
+            &[
+                &systemtender_id.to_string() as &(dyn postgres::types::ToSql + std::marker::Sync),
+                &group_id.to_string(),
+            ],
+        )?;
+        txn.commit().map_err(DbError::from)?;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::ledger::DsnConnect;
+
+    fn dsn() -> Option<String> {
+        std::env::var("LEDGER_TEST_DSN")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The room tests share one postgres and each rebuilds the room:
+    /// concurrent DROP/CREATE trips postgres's catalog race
+    /// (pg_type duplicate), so the room is serial.
+    static ROOM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_room() -> std::sync::MutexGuard<'static, ()> {
+        ROOM.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn fresh_room(dsn: &str) -> (ProbeCoordinator<DsnConnect>, ProbeCoordinator<DsnConnect>) {
+        let mut client = postgres::Client::connect(dsn, postgres::NoTls).unwrap();
+        for t in [
+            "sender_lease",
+            "detection_readiness",
+            "receiver_observations",
+            "interference_active_systemtenders",
+        ] {
+            client.execute(&format!("DROP TABLE IF EXISTS {t}"), &[]).unwrap();
+        }
+        drop(client);
+        let cfg = serde_json::json!({"detection": {"group": "rung10"}});
+        let a = ProbeCoordinator::new_dsn("tender-a", &cfg, dsn).unwrap();
+        let b = ProbeCoordinator::new_dsn("tender-b", &cfg, dsn).unwrap();
+        a.ensure_tables().unwrap();
+        register_interference_systemtender(&DsnConnect::new(dsn).unwrap(), "tender-a", "rung10")
+            .unwrap();
+        register_interference_systemtender(&DsnConnect::new(dsn).unwrap(), "tender-b", "rung10")
+            .unwrap();
+        (a, b)
+    }
+
+    fn raw(dsn: &str, sql: &str) {
+        let mut client = postgres::Client::connect(dsn, postgres::NoTls).unwrap();
+        client.execute(sql, &[]).unwrap();
+    }
+
+    fn park(dsn: &str, id: &str) {
+        raw(
+            dsn,
+            &format!("UPDATE interference_active_systemtenders \
+                      SET params = '{{}}'::jsonb WHERE systemtender_id = '{id}'"),
+        );
+    }
+
+    fn holder(dsn: &str) -> Option<String> {
+        let mut client = postgres::Client::connect(dsn, postgres::NoTls).unwrap();
+        let row = client
+            .query_one("SELECT holder FROM sender_lease", &[])
+            .unwrap();
+        row.get::<_, Option<String>>(0)
+    }
+
+    #[test]
+    fn unparked_peer_blocks_the_acquire() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = lock_room();
+        let (a, _b) = fresh_room(&dsn);
+        park(&dsn, "tender-a");
+        // tender-b registered but never parked (params NULL)
+        assert!(!a.try_acquire_lease("probe_push"));
+        assert_eq!(holder(&dsn), None);
+    }
+
+    #[test]
+    fn acquire_heartbeat_release_cycle() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = lock_room();
+        let (a, _b) = fresh_room(&dsn);
+        park(&dsn, "tender-a");
+        park(&dsn, "tender-b");
+        assert!(a.try_acquire_lease("probe_push"));
+        assert_eq!(holder(&dsn).as_deref(), Some("tender-a"));
+        assert!(*a.lease_token.borrow() >= 1);
+        assert!(a.heartbeat());
+        a.set_lease_phase("probe_push", Some(3), Some(2));
+        a.decrement_budget("probe_push", true);
+        a.release_lease();
+        assert_eq!(holder(&dsn), None);
+        // token-guarded: heartbeat after release no longer lands
+        assert!(!a.heartbeat());
+    }
+
+    #[test]
+    fn fair_share_denies_the_served_peer() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = lock_room();
+        let (a, b) = fresh_room(&dsn);
+        park(&dsn, "tender-a");
+        park(&dsn, "tender-b");
+        assert!(a.try_acquire_lease("probe_push")); // a served once
+        a.release_lease();
+        // b wants the mic and has fewer turns: a must be denied
+        raw(
+            &dsn,
+            "UPDATE interference_active_systemtenders \
+             SET walk_pending = TRUE WHERE systemtender_id = 'tender-b'",
+        );
+        assert!(!a.try_acquire_lease("probe_push"));
+        // and b takes it
+        assert!(b.try_acquire_lease("probe_push"));
+        assert_eq!(holder(&dsn).as_deref(), Some("tender-b"));
+    }
+
+    #[test]
+    fn stale_holder_is_reaped_and_replaced() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = lock_room();
+        let (a, b) = fresh_room(&dsn);
+        park(&dsn, "tender-a");
+        park(&dsn, "tender-b");
+        assert!(a.try_acquire_lease("probe_push"));
+        // backdate far past the stale interval (5 x 600s)
+        raw(
+            &dsn,
+            "UPDATE sender_lease SET last_heartbeat = NOW() - INTERVAL '4000 seconds'",
+        );
+        a.cleanup_stale_state();
+        assert_eq!(holder(&dsn), None);
+        assert!(b.try_acquire_lease("probe_push"));
+    }
+
+    #[test]
+    fn presence_demand_and_peer_counts() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = lock_room();
+        let (a, b) = fresh_room(&dsn);
+        park(&dsn, "tender-a");
+        park(&dsn, "tender-b");
+        assert_eq!(a.live_peer_count(), 1);
+        assert!(a.walk_pending_peers().is_empty());
+        b.publish_demand(true);
+        assert!(a.peer_walk_pending());
+        assert_eq!(a.walk_pending_peers(), vec!["tender-b".to_string()]);
+        b.publish_demand(false);
+        assert!(!a.peer_walk_pending());
+        a.refresh_presence();
+    }
+}
