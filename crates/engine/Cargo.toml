@@ -8,3 +8,12 @@ description = "The tender body — the vessel walk engine, ported from the pytho
 [lib]
 name = "godon_engine"
 path = "src/lib.rs"
+
+[dependencies]
+# The SQL layer (slice 2): the sync postgres client mirrors psycopg2's
+# blocking, one-connection-per-verb model; with-serde_json-1 binds the
+# jsonb columns. serde_json stays on DEFAULT features — no
+# preserve_order: the sorted map is half of python's sort_keys parity,
+# and the pyjson writer sorts explicitly on top of it.
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+serde_json = "1"
