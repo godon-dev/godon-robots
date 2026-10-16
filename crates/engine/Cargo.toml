@@ -15,3 +15,9 @@ path = "src/lib.rs"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 serde_json = "1"
 chrono = "0.4"
+# Blocking on purpose: the coordinator's causal calls and the notebook
+# walk ride the same sequential body the python did (urllib, inline).
+# No TLS feature: the estate's causal URL is plain http
+# (http://godon-godon-causal:9091); an https URL would surface as a
+# dark call, never a silent downgrade.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }

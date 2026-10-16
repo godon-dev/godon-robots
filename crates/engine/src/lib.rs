@@ -21,4 +21,7 @@
 
 pub mod ledger;
 pub mod coordinator;
+pub mod coordinator_walk;
+pub mod coverage_walk;
+pub mod walk_policy;
 pub mod worker;
