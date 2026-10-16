@@ -384,7 +384,7 @@ impl<C: Connect> TrialLedger<C> {
         })
     }
 
-    pub fn complete(&self, number: i64, value: f64) -> Result<(), DbError> {
+    pub fn complete(&self, number: i64, value: Option<f64>) -> Result<(), DbError> {
         self.with_conn(|tx| {
             tx.execute(
                 "UPDATE trials SET state = 'COMPLETE', value = $1, finished_ts = now() WHERE number = $2",
@@ -571,6 +571,11 @@ pub fn to_attrs_json(value: &Value) -> String {
     }
 }
 
+/// The one python-shaped writer, shared: the worker body's attr
+/// payloads and seek returns render through the same bytes the golden
+/// fixture pins.
+pub use pyjson::py_dumps;
+
 /// Python-shaped JSON, byte-for-byte: keys sorted, separators
 /// `", "` and `": "`, non-ASCII escaped (`ensure_ascii`), floats in
 /// python repr form (`75.0`, never `75`). One writer serves every
@@ -588,6 +593,8 @@ mod pyjson {
         out
     }
 
+    // kept: the indented renderer serves the images readers' format-on-demand
+    #[allow(dead_code)]
     pub fn py_dumps_indent(v: &Value) -> String {
         let mut out = String::new();
         write_indented(v, &mut out, 0);
@@ -625,6 +632,7 @@ mod pyjson {
         }
     }
 
+    #[allow(dead_code)]
     fn write_indented(v: &Value, out: &mut String, level: usize) {
         match v {
             Value::Array(items) if !items.is_empty() => {
@@ -667,6 +675,7 @@ mod pyjson {
         keys
     }
 
+    #[allow(dead_code)]
     fn push_indent(out: &mut String, level: usize) {
         for _ in 0..level {
             out.push(' ');
@@ -1028,7 +1037,7 @@ mod tests {
         refer
             .set_user_attr("effectuation_params", json!("{\"param_0\": 75.0}"))
             .unwrap();
-        ledger.complete(n, 0.512).unwrap();
+        ledger.complete(n, Some(0.512)).unwrap();
 
         // A failed one: park without neutral params.
         let n2 = ledger.begin().unwrap();

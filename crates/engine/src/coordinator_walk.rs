@@ -1635,8 +1635,8 @@ impl<C: Connect> ProbeCoordinator<C> {
 #[cfg(test)]
 mod walk_tests {
     use super::*;
-    use crate::coordinator::{ProbeCoordinator, MAX_HOLD_TRIALS};
-    use crate::ledger::{Connect, DbError, DsnConnect};
+    use crate::coordinator::ProbeCoordinator;
+    use crate::ledger::{Connect, DbError};
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};

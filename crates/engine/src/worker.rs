@@ -15,18 +15,21 @@ use crate::ledger::TrialLedger;
 pub enum WorkerError {
     MissingCreationTs,
     BadCreationTs(String),
+    /// ledger/schema init failure (python let psycopg2's own exception
+    /// out of __init__; the typed rust surface names it here)
+    Init(String),
 }
 
 impl std::fmt::Display for WorkerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkerError::MissingCreationTs => write!(
-                f,
-                "Required field 'creation_ts' missing from config"
-            ),
+            WorkerError::MissingCreationTs => {
+                write!(f, "Required field 'creation_ts' missing from config")
+            }
             WorkerError::BadCreationTs(s) => {
                 write!(f, "unparseable creation_ts: {s}")
             }
+            WorkerError::Init(s) => write!(f, "worker init failed: {s}"),
         }
     }
 }
@@ -105,7 +108,10 @@ impl WorkerConfig {
             group,
             creation_ts,
             run_id: config.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0),
-            target_id: config.get("target_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            target_id: config
+                .get("target_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
         })
     }
 
@@ -116,7 +122,10 @@ impl WorkerConfig {
 
     /// The worker identity string, same derivation.
     pub fn worker_id(&self) -> String {
-        format!("{}_worker_{}", self.systemtender_type, self.systemtender_uuid)
+        format!(
+            "{}_worker_{}",
+            self.systemtender_type, self.systemtender_uuid
+        )
     }
 }
 
@@ -171,7 +180,12 @@ pub fn should_continue_ledger(
     pin_receipt_current: bool,
 ) -> Result<Verdict, crate::ledger::DbError> {
     let stop = ledger.stop_requested()?;
-    Ok(should_continue(stop, wish_held, walk_complete, pin_receipt_current))
+    Ok(should_continue(
+        stop,
+        wish_held,
+        walk_complete,
+        pin_receipt_current,
+    ))
 }
 
 /// The liveness beater's shape: a parallel loop deliberately OUTSIDE
@@ -270,17 +284,29 @@ mod tests {
     fn verdict_ordering() {
         use Verdict::{Continue, Stop};
         // stop flag outranks a held wish
-        assert_eq!(should_continue(true, true, true, false), Stop("Stopping: Shutdown requested by controller"));
+        assert_eq!(
+            should_continue(true, true, true, false),
+            Stop("Stopping: Shutdown requested by controller")
+        );
         // held wish pins past walk-complete; pin receipt fires once
-        assert_eq!(should_continue(false, true, true, false), Continue { pin_fired: true });
-        assert_eq!(should_continue(false, true, true, true), Continue { pin_fired: false });
+        assert_eq!(
+            should_continue(false, true, true, false),
+            Continue { pin_fired: true }
+        );
+        assert_eq!(
+            should_continue(false, true, true, true),
+            Continue { pin_fired: false }
+        );
         // no wish + walk complete: the quiet-bench lever
         assert_eq!(
             should_continue(false, false, true, false),
             Stop("Stopping: characterization complete — walks done, leaving the bench quiet")
         );
         // walk not complete, no wish: keep going
-        assert_eq!(should_continue(false, false, false, false), Continue { pin_fired: false });
+        assert_eq!(
+            should_continue(false, false, false, false),
+            Continue { pin_fired: false }
+        );
     }
 
     #[test]
