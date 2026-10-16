@@ -1,0 +1,15 @@
+[package]
+name = "godon-strain-bench-generic"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+description = "The generic bench strain - the minimal config preflight, ported from strains/bench_generic (vessel rung 10)"
+
+[lib]
+name = "strain_bench_generic"
+path = "src/lib.rs"
+
+[dependencies]
+# preserve_order: python dicts iterate in insertion order; the
+# constraint scan rides that order.
+serde_json = { version = "1", features = ["preserve_order"] }

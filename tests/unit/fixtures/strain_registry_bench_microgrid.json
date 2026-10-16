@@ -1,0 +1,56 @@
+{
+ "entries": [
+  [
+   "power_draw",
+   {
+    "causes_downtime": false,
+    "description": "Power draw from grid (kW)",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     1000.0
+    ]
+   }
+  ],
+  [
+   "storage_dispatch",
+   {
+    "causes_downtime": false,
+    "description": "Battery dispatch (-500=discharge, +500=charge kW)",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     -500.0,
+     500.0
+    ]
+   }
+  ],
+  [
+   "local_generation",
+   {
+    "causes_downtime": false,
+    "description": "On-site generation output (kW)",
+    "scope": "global",
+    "type": "float",
+    "typical_range": [
+     0.0,
+     500.0
+    ]
+   }
+  ],
+  [
+   "sim_steps",
+   {
+    "causes_downtime": false,
+    "description": "Simulation steps per trial",
+    "scope": "global",
+    "type": "int",
+    "typical_range": [
+     10,
+     200
+    ]
+   }
+  ]
+ ]
+}
