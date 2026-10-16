@@ -1,0 +1,20 @@
+name: Rust Tests
+
+# Vessel rung 10: the rust port's parity harness. The engine crate's
+# tests are the byte-exact mirror of the python golden cases — CI green
+# here is the port slices' exit criterion.
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo test
+        working-directory: .
+        run: |
+          cargo --version
+          cargo test --all
