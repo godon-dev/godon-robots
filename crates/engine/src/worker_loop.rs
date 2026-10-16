@@ -10,9 +10,10 @@
 //!   python tests patched the ledger object.
 //! - `CoordGate` — the coordinator surface the loop drives (the
 //!   python duck-typed the same methods, and its tests stubbed them).
-//! - `WmillGate` — windmill's script runner + set_state. The recon and
-//!   effectuation leaves port in their own slices and bring the real
-//!   client; the worker rides this seam until then.
+//! - `WmillGate` — windmill's script runner + set_state. The real
+//!   client (`godon_wmill`) landed with the recon/effectuation
+//!   leaves (slice 8); the trait stays as the tests' injection
+//!   surface.
 //! - own/shared db `Connect` — beats, stamps, registration, standing
 //!   params; the same short-connection shapes the python wrote.
 //! - `HttpTransport` — the wish plan fetch (plain http, timeout 10s).
@@ -199,11 +200,22 @@ impl<C: Connect> CoordGate for ProbeCoordinator<C> {
 // ─── the windmill seam ────────────────────────────────────────────
 
 /// The platform edge: run a script by path (the recon and effectuation
-/// leaves) and set the job state. The real client lands with those
-/// leaves' slice; the worker body rides this seam.
+/// leaves) and set the job state. The real client (`godon_wmill`,
+/// slice 8) implements this behind the same methods the python
+/// `wmill` module exposed; tests inject fakes exactly where the
+/// python tests patched the module.
 pub trait WmillGate: Send + Sync {
     fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String>;
     fn set_state(&self, state: &Value) -> Result<(), String>;
+}
+
+impl WmillGate for godon_wmill::WmillClient {
+    fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String> {
+        godon_wmill::WmillClient::run_script_by_path(self, path, args)
+    }
+    fn set_state(&self, state: &Value) -> Result<(), String> {
+        godon_wmill::WmillClient::set_state(self, state)
+    }
 }
 
 // ─── the dial source (the worker's hook implementations) ──────────
@@ -428,9 +440,8 @@ fn unix_now() -> f64 {
 // ─── the worker ───────────────────────────────────────────────────
 
 /// The worker's injected edges. The production sources (DsnConnect on
-/// the libpq/shared urls, ReqwestTransport) build via
-/// [`WorkerSeams::production`]; the wmill client stays explicit until
-/// its leaf slice.
+/// the libpq/shared urls, ReqwestTransport, the godon-wmill client)
+/// build via [`WorkerSeams::production`]; tests inject fakes.
 pub struct WorkerSeams {
     /// the tender's own db (beats, instruments, finished stamps)
     pub own_db: Arc<dyn Connect + Send + Sync>,
@@ -447,7 +458,9 @@ pub struct WorkerSeams {
 impl WorkerSeams {
     /// Everything but the wmill client, from the environment exactly
     /// as the python derived it. `tender_db` is the ledger's own
-    /// database name (`systemtender_{uuid}`).
+    /// database name (`systemtender_{uuid}`). The wmill client is
+    /// passed in — the caller builds `godon_wmill::WmillClient::
+    /// from_env` (the binary's main does exactly that).
     pub fn production(wmill: Arc<dyn WmillGate>, tender_db: &str) -> Self {
         let pw = std::env::var("GODON_ARCHIVE_DB_PASSWORD").unwrap_or_else(|_| "postgres".into());
         let user = std::env::var("GODON_ARCHIVE_DB_USER").unwrap_or_else(|_| "postgres".into());

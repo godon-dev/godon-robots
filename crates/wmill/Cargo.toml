@@ -1,0 +1,13 @@
+[package]
+name = "godon-wmill"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+description = "The windmill client — the three verbs the tender body speaks (run script by path, set state, get variable), ported from the wmill python client at the estate's pin"
+
+[dependencies]
+serde_json = "1"
+# Blocking, no TLS — the estate's windmill API is reached over plain
+# http inside the cluster (BASE_INTERNAL_URL); an https base would
+# surface as a dark call, never a silent downgrade.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }

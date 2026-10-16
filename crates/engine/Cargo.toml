@@ -30,3 +30,12 @@ strain_bench_generic = { package = "godon-strain-bench-generic", path = "../stra
 strain_bench_greenhouse = { package = "godon-strain-bench-greenhouse", path = "../strain-bench-greenhouse" }
 strain_bench_microgrid = { package = "godon-strain-bench-microgrid", path = "../strain-bench-microgrid" }
 strain_linux_performance = { package = "godon-strain-linux-performance", path = "../strain-linux-performance" }
+# The windmill client (slice 8): the real client behind the
+# worker's WmillGate trait, and the components' own edges (auth
+# variables, the playbook runner).
+godon_wmill = { package = "godon-wmill", path = "../wmill" }
+# The reconnaissance/effectuation components (slice 8) — library
+# bodies the binary dispatches to; the image is ONE whole engine
+# binary.
+godon_recon = { package = "godon-recon", path = "../recon" }
+godon_effectuation = { package = "godon-effectuation", path = "../effectuation" }

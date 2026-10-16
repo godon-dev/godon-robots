@@ -6,12 +6,17 @@ members = [
     "crates/strain-bench-greenhouse",
     "crates/strain-bench-microgrid",
     "crates/strain-linux-performance",
+    "crates/wmill",
+    "crates/recon",
+    "crates/effectuation",
 ]
 # The vessel rung-10 rust port (chime designs/2026-10-15-rung10-rust-port-plan.md).
-# Crates land WITH their ports, not empty: recon/effectuation arrive in
-# their own slices. The family strain crates (rung 10 slice 7) carry the
-# dial registries and create-time preflights — cut along family lines so
-# purpose profiles stay one factory flag later.
+# Crates land WITH their ports, not empty: slice 8 brings the windmill
+# client (godon-wmill) and the reconnaissance/effectuation
+# components. The family
+# strain crates (rung 10 slice 7) carry the dial registries and
+# create-time preflights — cut along family lines so purpose profiles
+# stay one factory flag later.
 
 [workspace.package]
 edition = "2021"

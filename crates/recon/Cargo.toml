@@ -1,0 +1,13 @@
+[package]
+name = "godon-recon"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+description = "The reconnaissance leaves — generic HTTP and Prometheus metric gathering with stabilization waits, multi-sampling, aggregation and retry ladders, ported from the python originals"
+
+[dependencies]
+serde_json = "1"
+# Blocking, no TLS — the estate's recon endpoints are plain http
+# inside the cluster; an https URL surfaces as a dark call, never a
+# silent downgrade (the engine's HttpTransport stance).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
