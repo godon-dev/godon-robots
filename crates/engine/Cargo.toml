@@ -15,6 +15,9 @@ path = "src/lib.rs"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 serde_json = "1"
 chrono = "0.4"
+# The seek wish's launch seed: sha256(wish_id)[:8] big-endian, the
+# python `hashlib.sha256` receipt verbatim (seek_wish.launch_seed).
+sha2 = "0.10"
 # Blocking on purpose: the coordinator's causal calls and the notebook
 # walk ride the same sequential body the python did (urllib, inline).
 # No TLS feature: the estate's causal URL is plain http

@@ -19,9 +19,15 @@
 //! is the golden fixture (python: `tests/unit/test_trial_ledger.py`),
 //! not shared code. Fixture parity is byte-exact, never approximate.
 
-pub mod ledger;
+pub mod characterization;
 pub mod coordinator;
 pub mod coordinator_walk;
 pub mod coverage_walk;
+pub mod ledger;
+pub mod metrics;
+pub mod seek;
+pub mod seek_driver;
+pub mod seek_policy;
 pub mod walk_policy;
 pub mod worker;
+pub mod worker_loop;
