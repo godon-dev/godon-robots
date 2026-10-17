@@ -3,7 +3,9 @@ target: systemtender/engine
 workspace: godon
 
 scripts:
-  - pattern: "systemtender_worker.sh"
+  - script: "systemtender_worker"
+    sandbox: "ghcr.io/godon-dev/godon-robots"
+    tag_env: "ROBOT_VERSION"
     settings:
       summary: "Godon Systemtender Engine"
       description: "Generic systemtender worker engine. Runs the trial loop — walks, holds, leases, guardrails, rollback, metrics — and loads domain-specific strains for the dial set."

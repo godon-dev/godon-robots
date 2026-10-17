@@ -3,14 +3,18 @@ target: reconnaissance
 workspace: godon
 
 scripts:
-  - pattern: "prometheus.sh"
+  - script: "prometheus"
+    sandbox: "ghcr.io/godon-dev/godon-robots"
+    tag_env: "ROBOT_VERSION"
     settings:
       summary: "Generic Prometheus Reconnaissance"
       description: "Gather metrics from Prometheus with configurable stabilization delay, multi-sampling with median aggregation, and exponential backoff retry logic for transient failures."
       timeout: 300
       tag: "robot"
 
-  - pattern: "http.sh"
+  - script: "http"
+    sandbox: "ghcr.io/godon-dev/godon-robots"
+    tag_env: "ROBOT_VERSION"
     settings:
       summary: "Generic HTTP Reconnaissance"
       description: "Gather metrics via HTTP GET with configurable stabilization delay, multi-sampling with aggregation, and exponential backoff retry. Extracts values by key from JSON responses."

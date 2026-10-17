@@ -3,7 +3,9 @@ target: systemtender/strains/bench_greenhouse
 workspace: godon
 
 scripts:
-  - pattern: "preflight.sh"
+  - script: "preflight"
+    sandbox: "ghcr.io/godon-dev/godon-robots"
+    tag_env: "ROBOT_VERSION"
     settings:
       summary: "Greenhouse Bench Strain"
       description: "Domain knowledge for greenhouse simulation optimization - parameter registry, preflight validation, and suggestion logic for multi-zone climate control"
