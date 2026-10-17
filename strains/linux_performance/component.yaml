@@ -3,7 +3,9 @@ target: systemtender/strains/linux_performance
 workspace: godon
 
 scripts:
-  - pattern: "preflight.sh"
+  - script: "preflight"
+    sandbox: "ghcr.io/godon-dev/godon-robots"
+    tag_env: "ROBOT_VERSION"
     settings:
       summary: "Linux Performance Strain"
       description: "Domain knowledge for Linux system parameter optimization - parameter registry, preflight validation, and suggestion logic"

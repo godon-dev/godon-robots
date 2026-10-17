@@ -10,7 +10,7 @@ description = "The tender body - the repo root is the platform entry (the godon-
 # boundary is repo structure, the artifact name is the contract.
 [[bin]]
 name = "godon-engine"
-path = "src/main.rs"
+path = "main.rs"
 
 [dependencies]
 serde_json = "1"
