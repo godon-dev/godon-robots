@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/engine",
-    "crates/strain-bench-generic",
-    "crates/strain-bench-greenhouse",
-    "crates/strain-bench-microgrid",
-    "crates/strain-linux-performance",
-    "crates/wmill",
-    "crates/recon",
-    "crates/effectuation",
+    "engine",
+    "strains/bench_generic",
+    "strains/bench_greenhouse",
+    "strains/bench_microgrid",
+    "strains/linux_performance",
+    "wmill",
+    "reconnaissance",
+    "effectuation",
 ]
 # The vessel rung-10 rust port (chime designs/2026-10-15-rung10-rust-port-plan.md).
 # Crates land WITH their ports, not empty: slice 8 brings the windmill

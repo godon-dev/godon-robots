@@ -1068,12 +1068,12 @@ mod tests {
         let dump = canonical_dump(&dsn);
         let produced = super::pyjson::py_dumps_indent(&dump);
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/unit/fixtures/ledger_golden.json");
+            .join("../tests/unit/fixtures/ledger_golden.json");
         if std::env::var("UPDATE_FIXTURE").is_ok() {
             std::fs::write(&fixture_path, produced.clone() + "\n").unwrap();
             return;
         }
-        let expected = include_str!("../../../tests/unit/fixtures/ledger_golden.json");
+        let expected = include_str!("../../tests/unit/fixtures/ledger_golden.json");
         assert_eq!(
             produced.trim(),
             expected.trim(),
