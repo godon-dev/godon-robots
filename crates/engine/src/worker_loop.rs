@@ -19,11 +19,13 @@
 //! - `HttpTransport` — the wish plan fetch (plain http, timeout 10s).
 //! - `PushTransport` — the metrics client's pushgateway edge.
 //!
-//! RUNG-8 EXCLUSION (recorded): the python boot park's
-//! standing-params resume — the death-resume path — ports LAST, after
-//! its flight settles. This body parks at neutral on a bare boot, the
-//! pre-rung-8 shape; `park_before_announcement` carries the place where
-//! the resume branch lands.
+//! RUNG-8 LANDED (the death resume at boot, robots #252's shape): a
+//! held wish waiting in the ledger parks the relaunched worker at
+//! its last standing params instead of neutral — dials persist on
+//! the target hosts across worker death, and dragging a held dial
+//! back to neutral would break the hold being resumed. Receivers
+//! still park neutral (stillness); bare boots park neutral exactly
+//! as before; every read failure degrades to the bare-boot path.
 //!
 //! Known divergences (python reference vs landed rust):
 //! - `CoordHooks::compute_neutral_params` returns Option, not Result —
@@ -655,9 +657,9 @@ impl<K: Coordinator> Worker<K> {
         // the liveness beater: daemon semantics, outside the cadence
         worker.start_heartbeat();
 
-        // The first park BEFORE the room announcement (pre-rung-8
-        // shape: neutral on a bare boot; the death-resume paths land
-        // with the rung-8 paths, after their flight).
+        // The first park BEFORE the room announcement (rung 8: the
+        // death resume — a held wish parks at its last standing
+        // params; bare boots and receivers park neutral).
         worker.park_before_announcement();
         worker.register_interference_systemtender();
         worker.update_state().ok();
@@ -1955,34 +1957,109 @@ impl<K: Coordinator> Worker<K> {
         }
     }
 
-    /// Apply the boot park BEFORE the tender announces itself. The
-    /// bench boots at param_lower — the dials' extreme — and a
-    /// registration that outran the first park let the room's first
-    /// measurement window bank that extreme (found live Sep 30).
+    /// The park target at boot (rung 8, designs/2026-10-11 XX — the
+    /// death resume at boot).
     ///
-    /// Pre-rung-8 shape: neutral on a bare boot. RUNG-8 SEAM: the
-    /// standing-params resume (a held wish parks at its last standing
-    /// params) lands here with the death-resume paths, after their
-    /// flight settles.
-    pub fn park_before_announcement(&mut self) {
-        let neutral = match self.dials.compute_neutral_params() {
-            Ok(v) => v,
+    /// A relaunched holder keeps its measured state: dials are
+    /// target-host settings and persist across worker death, so the
+    /// park asserts the last standing params instead of dragging a
+    /// held dial back to neutral and breaking the hold the worker is
+    /// about to resume. A receiver's contribution is stillness — it
+    /// parks at neutral. A bare boot (no assignment row) parks at
+    /// neutral exactly as before; every read failure degrades to the
+    /// bare-boot path.
+    fn boot_park_params(&self) -> Option<Map<String, Value>> {
+        let assignment = match self.ledger.wish_latest() {
+            Ok(a) => a,
             Err(e) => {
-                eprintln!("BOOT PARK: neutral computation failed ({e}) - skipping; the room may see boot state");
-                return;
+                eprintln!("BOOT PARK: assignment read failed ({e}) - treating as bare boot");
+                None
             }
         };
-        let Some(neutral) = neutral else {
+        if let Some((wish_id, role)) = assignment {
+            // python `(role or 'sender')`: an empty role reads sender
+            let role = if role.is_empty() {
+                "sender".to_string()
+            } else {
+                role
+            };
+            if role == "receiver" {
+                eprintln!("BOOT PARK: receiver of wish {wish_id} - stillness, parking neutral");
+            } else {
+                // the standing params live in the ROLLBACK STATE —
+                // python reads exactly this key, not the trials-based
+                // `get_last_successful_params` helper
+                match self.ledger.state_get(&self.rollback_state_key()) {
+                    Ok(Some(state_json)) => match serde_json::from_str::<Value>(&state_json) {
+                        Ok(v) => {
+                            // python truthiness: an absent, null, or
+                            // EMPTY map parks neutral
+                            let standing = v
+                                .get("last_successful_params")
+                                .and_then(|p| p.as_object())
+                                .filter(|m| !m.is_empty())
+                                .cloned();
+                            match standing {
+                                Some(standing) => {
+                                    eprintln!(
+                                        "BOOT PARK: resuming holder of wish {wish_id} \
+                                         at last standing params ({} dials)",
+                                        standing.len()
+                                    );
+                                    return Some(standing);
+                                }
+                                None => {
+                                    eprintln!(
+                                        "BOOT PARK: wish {wish_id} held but no standing params - parking neutral"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("BOOT PARK: standing read failed ({e}) - parking neutral");
+                        }
+                    },
+                    Ok(None) => {
+                        eprintln!(
+                            "BOOT PARK: wish {wish_id} held but no standing params - parking neutral"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("BOOT PARK: standing read failed ({e}) - parking neutral");
+                    }
+                }
+            }
+        }
+        match self.dials.compute_neutral_params() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "BOOT PARK: neutral computation failed ({e}) - skipping; the room may see boot state"
+                );
+                None
+            }
+        }
+    }
+
+    /// Apply the boot park BEFORE the tender announces itself to
+    /// the room (registration). The bench boots at param_lower — the
+    /// dials' extreme — and a registration that outran the first
+    /// park let the room's first measurement window bank that
+    /// extreme (found live Sep 30). The target: neutral on a bare
+    /// boot, the last standing params when a held wish waits in the
+    /// ledger (rung 8 — the death resume).
+    pub fn park_before_announcement(&mut self) {
+        let Some(target) = self.boot_park_params() else {
             eprintln!("BOOT PARK: no park target - skipping");
             return;
         };
-        if let Err(e) = self.execute_trial(&neutral) {
+        if let Err(e) = self.execute_trial(&target) {
             eprintln!("BOOT PARK: apply failed ({e}) - skipping; the room may see boot state");
             return;
         }
         eprintln!(
-            "BOOT PARK: dials at neutral before announcement ({} dials)",
-            neutral.len()
+            "BOOT PARK: {} dials applied before announcement",
+            target.len()
         );
     }
 
@@ -2815,6 +2892,9 @@ mod tests {
         stop: bool,
         wish: Option<(String, String)>,
         removed_wishes: Vec<String>,
+        // read-failure injection (rung 8's degradation tests)
+        state_get_err: Option<String>,
+        wish_latest_err: Option<String>,
     }
 
     #[derive(Clone)]
@@ -2834,10 +2914,18 @@ mod tests {
                 stop: false,
                 wish: None,
                 removed_wishes: Vec::new(),
+                state_get_err: None,
+                wish_latest_err: None,
             })))
         }
         fn set_wish(&self, w: Option<(String, String)>) {
             self.0.lock().unwrap().wish = w;
+        }
+        fn set_state_get_err(&self, e: Option<String>) {
+            self.0.lock().unwrap().state_get_err = e;
+        }
+        fn set_wish_latest_err(&self, e: Option<String>) {
+            self.0.lock().unwrap().wish_latest_err = e;
         }
         fn set_trials(&self, t: Vec<TrialRecord>) {
             self.0.lock().unwrap().trials = t;
@@ -2908,7 +2996,11 @@ mod tests {
             Ok(())
         }
         fn state_get(&self, key: &str) -> Result<Option<String>, DbError> {
-            Ok(self.0.lock().unwrap().state.get(key).cloned())
+            let g = self.0.lock().unwrap();
+            if let Some(e) = &g.state_get_err {
+                return Err(DbError::new(e.as_str()));
+            }
+            Ok(g.state.get(key).cloned())
         }
         fn state_put(&self, key: &str, value: &str) -> Result<(), DbError> {
             self.0
@@ -2927,7 +3019,11 @@ mod tests {
             Ok(self.0.lock().unwrap().stop)
         }
         fn wish_latest(&self) -> Result<Option<(String, String)>, DbError> {
-            Ok(self.0.lock().unwrap().wish.clone())
+            let g = self.0.lock().unwrap();
+            if let Some(e) = &g.wish_latest_err {
+                return Err(DbError::new(e.as_str()));
+            }
+            Ok(g.wish.clone())
         }
         fn wish_remove(&self, wish_id: &str) -> Result<(), DbError> {
             self.0
@@ -3007,6 +3103,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeWmill {
         calls: Arc<Mutex<Vec<String>>>,
+        args: Arc<Mutex<Vec<Value>>>,
         scripts: Arc<Mutex<VecDeque<Result<Value, String>>>>,
         states: Arc<Mutex<Vec<Value>>>,
     }
@@ -3015,6 +3112,7 @@ mod tests {
         fn new(scripts: Vec<Result<Value, String>>) -> Self {
             FakeWmill {
                 calls: Arc::new(Mutex::new(Vec::new())),
+                args: Arc::new(Mutex::new(Vec::new())),
                 scripts: Arc::new(Mutex::new(scripts.into())),
                 states: Arc::new(Mutex::new(Vec::new())),
             }
@@ -3022,8 +3120,9 @@ mod tests {
     }
 
     impl Wmill for FakeWmill {
-        fn run_script_by_path(&self, path: &str, _args: &Value) -> Result<Value, String> {
+        fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String> {
             self.calls.lock().unwrap().push(path.to_string());
+            self.args.lock().unwrap().push(args.clone());
             self.scripts
                 .lock()
                 .unwrap()
@@ -3229,6 +3328,174 @@ mod tests {
             BTreeMap::new(),
         );
         assert!(w.execute_trial(&Map::new()).is_err());
+    }
+
+    // ─── TestDeathResume (rung 8 — the boot park's standing-params
+    // resume, python tests/unit/test_death_cures.py ported
+    // one-for-one) ───
+
+    /// The neutral in these tests: a completed trial's stashed
+    /// effectuation params (no matching bounds in the config, so
+    /// the template rides unchanged).
+    fn park_neutral_trial() -> TrialRecord {
+        TrialRecord {
+            number: 1,
+            kind: "hold".into(),
+            params: json!({}),
+            value: Some(0.5),
+            state: "COMPLETE".into(),
+            error: None,
+            attrs: json!({"effectuation_params": {"param_0": 50.0}}),
+            created_ts: None,
+            finished_ts: None,
+            values: vec![0.5],
+        }
+    }
+
+    /// The boot harness: seed the neutral template, an optional
+    /// assignment row, an optional standing map in the rollback
+    /// state, park, and return the APPLIED settings (the first
+    /// effectuation call's args — python's `applied` list).
+    fn boot_park_applied(
+        assignment: Option<(&str, &str)>,
+        standing: Option<f64>,
+    ) -> Map<String, Value> {
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.set_trials(vec![park_neutral_trial()]);
+        if let Some((w, r)) = assignment {
+            ledger.set_wish(Some((w.to_string(), r.to_string())));
+        }
+        if let Some(v) = standing {
+            ledger.0.lock().unwrap().state.insert(
+                "rollback_state_target_0".to_string(),
+                serde_json::to_string(&json!({
+                    "state": "normal",
+                    "last_successful_params": {"param_0": v},
+                }))
+                .unwrap(),
+            );
+        }
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed"})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 42.5}})),
+        ]);
+        let handle = wmill.clone();
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            FakeCoord::new(vec![], vec![]),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.park_before_announcement();
+        let args = handle.args.lock().unwrap().clone();
+        assert!(!args.is_empty(), "the park must effectuate once");
+        args[0]
+            .get("settings")
+            .and_then(|s| s.as_object())
+            .cloned()
+            .expect("the effectuation args carry the park target as settings")
+    }
+
+    #[test]
+    fn resume_holder_parks_at_standing() {
+        let applied = boot_park_applied(Some(("sw-1", "sender")), Some(73.5));
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(73.5))]),
+            "a relaunched holder parks at its last standing params"
+        );
+    }
+
+    #[test]
+    fn receiver_parks_neutral() {
+        let applied = boot_park_applied(Some(("sw-1", "receiver")), Some(73.5));
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(50.0))]),
+            "a receiver's contribution is stillness - neutral"
+        );
+    }
+
+    #[test]
+    fn holder_without_standing_parks_neutral() {
+        let applied = boot_park_applied(Some(("sw-1", "sender")), None);
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(50.0))]),
+            "a held wish with no measured state starts from neutral"
+        );
+    }
+
+    #[test]
+    fn bare_boot_parks_neutral() {
+        let applied = boot_park_applied(None, Some(73.5));
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(50.0))]),
+            "a bare boot parks neutral exactly as before rung 8"
+        );
+    }
+
+    #[test]
+    fn assignment_read_failure_degrades_to_bare_boot() {
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.set_trials(vec![park_neutral_trial()]);
+        ledger.set_wish_latest_err(Some("db down".to_string()));
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed"})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 42.5}})),
+        ]);
+        let handle = wmill.clone();
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            FakeCoord::new(vec![], vec![]),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.park_before_announcement();
+        let applied = handle.args.lock().unwrap()[0]
+            .get("settings")
+            .and_then(|s| s.as_object())
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(50.0))]),
+            "an unreadable assignment degrades to the bare-boot park"
+        );
+    }
+
+    #[test]
+    fn standing_read_failure_degrades_to_neutral() {
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.set_trials(vec![park_neutral_trial()]);
+        ledger.set_wish(Some(("sw-1".to_string(), "sender".to_string())));
+        ledger.set_state_get_err(Some("db down".to_string()));
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed"})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 42.5}})),
+        ]);
+        let handle = wmill.clone();
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            FakeCoord::new(vec![], vec![]),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.park_before_announcement();
+        let applied = handle.args.lock().unwrap()[0]
+            .get("settings")
+            .and_then(|s| s.as_object())
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            applied,
+            Map::from_iter([("param_0".to_string(), json!(50.0))]),
+            "an unreadable standing state degrades to neutral"
+        );
     }
 
     // ─── TestRunReconnaissance ───
