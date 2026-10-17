@@ -3,7 +3,7 @@ target: systemtender/engine
 workspace: godon
 
 scripts:
-  - pattern: "*.py"
+  - pattern: "systemtender_worker.sh"
     settings:
       summary: "Godon Systemtender Engine"
       description: "Generic systemtender worker engine. Runs the trial loop — walks, holds, leases, guardrails, rollback, metrics — and loads domain-specific strains for the dial set."

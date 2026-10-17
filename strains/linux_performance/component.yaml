@@ -3,7 +3,7 @@ target: systemtender/strains/linux_performance
 workspace: godon
 
 scripts:
-  - pattern: "*.py"
+  - pattern: "preflight.sh"
     settings:
       summary: "Linux Performance Strain"
       description: "Domain knowledge for Linux system parameter optimization - parameter registry, preflight validation, and suggestion logic"
@@ -14,9 +14,3 @@ scripts:
       summary: "Linux Performance Parameters Effectuation Playbook"
       description: "Ansible playbook for applying sysctl, sysfs, cpufreq, and ethtool parameters via SSH"
       tag: "systemtender"
-
-flows:
-  - pattern: "effectuation_flow.yaml"
-    settings:
-      summary: "Linux Performance Effectuation Flow"
-      description: "Orchestrates parameter application and metric gathering via generic effectuation and reconnaissance modules"
