@@ -12,11 +12,11 @@
 //!   ethtool branch after already erroring on non-dicts one line
 //!   above — dead code, not ported.
 //! - a null `settings` makes `category not in settings` raise
-//!   TypeError INSIDE the try — the except envelope carries it.
+//!   TypeError INSIDE the try — the except result carries it.
 //! - NAMED DIVERGENCE, non-object non-null `settings` (a string):
 //!   python's `in` does substring matching there, so most such
 //!   configs skip every category and pass; the port fails closed
-//!   with the AttributeError envelope. No python test pins the
+//!   with the AttributeError result. No python test pins the
 //!   substring path, and a preflight refusing absurd shapes is the
 //!   safer read of the contract.
 //! - the meta read sits OUTSIDE the try (a null meta raises straight
@@ -174,7 +174,7 @@ fn validate(
     let settings = py_get_or(config, "settings", &empty)?;
     if settings.is_null() {
         // python: `category not in settings` on None raises TypeError
-        // inside the try — the except envelope carries it
+        // inside the try — the except result carries it
         return Err("argument of type 'NoneType' is not iterable".to_string());
     }
 
@@ -599,9 +599,9 @@ mod tests {
     // them (receipts in the module doc) ---
 
     #[test]
-    fn permissive_unknown_param_stops_with_keyerror_envelope() {
+    fn permissive_unknown_param_stops_with_keyerror_result() {
         // python: warning appended, then the bare registry lookup
-        // raises KeyError — the except envelope carries str(KeyError)
+        // raises KeyError — the except result carries str(KeyError)
         let config = json!({
             "meta": {"strict_validation": false},
             "settings": {"sysctl": {
@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn null_settings_is_the_except_envelope() {
+    fn null_settings_is_the_except_result() {
         // python: `'sysctl' not in None` raises TypeError inside try
         let config = json!({"settings": null});
         match main(Some(&config), true).unwrap() {

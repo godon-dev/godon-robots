@@ -28,7 +28,7 @@ pub enum PromErr {
     Fatal(String),
 }
 
-/// The connection seam — the python tests patched the whole
+/// The connection trait — the python tests patched the whole
 /// `custom_query`; the rust tests fake this surface.
 pub trait PromConnect: Send + Sync {
     fn custom_query(&self, url: &str, query: &str) -> Result<Value, PromErr>;

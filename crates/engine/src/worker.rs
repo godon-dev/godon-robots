@@ -1,7 +1,7 @@
 //! The worker's lifecycle spine — the port of `systemtender_worker.py`'s
 //! config parse, continue-policy, and heartbeat shape. The deep body
 //! (probe coordinator, rollback machine, wish serving, trials) lands in
-//! its own slices against these seams; nothing here is faked.
+//! its own slices against these traits; nothing here is faked.
 
 use std::thread::{self, JoinHandle};
 use std::time::Duration;

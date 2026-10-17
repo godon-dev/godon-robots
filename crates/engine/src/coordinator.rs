@@ -1,7 +1,7 @@
 //! The probe coordinator's room machinery — the port of
 //! `probe_coordinator.py`'s shared-database layer: the room tables,
 //! the census, and the sender-lease machine. The walk/characterization
-//! half of the coordinator lands in its own slice against these seams.
+//! half of the coordinator lands in its own slice against these traits.
 //!
 //! The room's DB layer is deliberately forgiving, exactly like the
 //! python original: room machinery must never crash a walker — ops the
@@ -32,7 +32,7 @@ pub const ACTIVE_SYSTEMTENDER_WINDOW_SECONDS: i64 = 360;
 /// The unified detection + characterization coordinator: the room
 /// side (tables, census, lease machine) lives here; the
 /// walk/characterization half (its state fields are below, its
-/// behavior in [`crate::coordinator_walk`]) lands against these seams.
+/// behavior in [`crate::coordinator_walk`]) lands against these traits.
 pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     pub systemtender_id: String,
     pub group_id: String,
@@ -581,7 +581,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         );
         let phase = phase.to_string();
         // the budget columns are INT — psycopg2 sent python ints; the
-        // i64 seam wrote nothing (swallowed warning) until the walk
+        // i64 write sent nothing (a swallowed warning) until the walk
         // half's state-machine tests asserted the phase write
         // (receipt: CI run 38938181276)
         let push_b = push_budget.map(|v| v as i32);
