@@ -29,10 +29,10 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 # The strain family crates — compiled in per the purpose-profile
 # ruling; the engine's boot-time load_strain check rides them.
-strain_bench_generic = { package = "godon-strain-bench-generic", path = "../strain-bench-generic" }
-strain_bench_greenhouse = { package = "godon-strain-bench-greenhouse", path = "../strain-bench-greenhouse" }
-strain_bench_microgrid = { package = "godon-strain-bench-microgrid", path = "../strain-bench-microgrid" }
-strain_linux_performance = { package = "godon-strain-linux-performance", path = "../strain-linux-performance" }
+strain_bench_generic = { package = "godon-strain-bench-generic", path = "../strains/bench_generic" }
+strain_bench_greenhouse = { package = "godon-strain-bench-greenhouse", path = "../strains/bench_greenhouse" }
+strain_bench_microgrid = { package = "godon-strain-bench-microgrid", path = "../strains/bench_microgrid" }
+strain_linux_performance = { package = "godon-strain-linux-performance", path = "../strains/linux_performance" }
 # The windmill client (slice 8): the real client behind the
 # worker's WmillGate trait, and the components' own edges (auth
 # variables, the playbook runner).
@@ -40,5 +40,5 @@ godon_wmill = { package = "godon-wmill", path = "../wmill" }
 # The reconnaissance/effectuation components (slice 8) — library
 # bodies the binary dispatches to; the image is ONE whole engine
 # binary.
-godon_recon = { package = "godon-recon", path = "../recon" }
+godon_recon = { package = "godon-recon", path = "../reconnaissance" }
 godon_effectuation = { package = "godon-effectuation", path = "../effectuation" }
