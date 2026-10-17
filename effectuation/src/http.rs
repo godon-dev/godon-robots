@@ -138,8 +138,8 @@ pub fn main(
         .unwrap_or(0.0);
 
     let targets = targets.as_array().cloned().unwrap_or_default();
-    eprintln!("HTTP effectuation for {} targets", targets.len());
-    eprintln!(
+    log::info!("HTTP effectuation for {} targets", targets.len());
+    log::debug!(
         "Endpoint: {} {}",
         endpoint_config
             .get("method")
@@ -150,7 +150,7 @@ pub fn main(
             .and_then(|p| p.as_str())
             .unwrap_or("")
     );
-    eprintln!("Settings: {}", settings_keys(settings));
+    log::info!("Settings: {}", settings_keys(settings));
 
     let mut all_results: Vec<Value> = Vec::new();
 
@@ -163,7 +163,7 @@ pub fn main(
             .unwrap_or("none");
         let auth_variable_path = target.get("auth_variable_path").and_then(|p| p.as_str());
 
-        eprintln!(
+        log::info!(
             "Processing target {}: {}",
             target_id,
             base_url.unwrap_or("")
@@ -183,7 +183,7 @@ pub fn main(
     }
 
     if stabilization_seconds > 0.0 {
-        eprintln!("Waiting {stabilization_seconds}s for system stabilization");
+        log::info!("Waiting {stabilization_seconds}s for system stabilization");
         sleep(stabilization_seconds);
     }
 
@@ -193,7 +193,7 @@ pub fn main(
         .count();
     let total_count = all_results.len();
 
-    eprintln!("HTTP effectuation completed: {success_count}/{total_count} successful");
+    log::info!("HTTP effectuation completed: {success_count}/{total_count} successful");
 
     json!({
         "status": "completed",
@@ -237,7 +237,7 @@ fn apply_to_target(
     ) {
         Ok(row) => row,
         Err(e) => {
-            eprintln!("Failed to process target {target_id}: {e}");
+            log::info!("Failed to process target {target_id}: {e}");
             error_row(
                 target_id,
                 Value::String(base_url.unwrap_or("").to_string()),

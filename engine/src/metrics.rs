@@ -138,7 +138,7 @@ impl SystemtenderMetricsClient {
         {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("Failed to push metrics to {}: {e}", self.pushgateway_url);
+                log::info!("Failed to push metrics to {}: {e}", self.pushgateway_url);
                 false
             }
         }
@@ -155,7 +155,7 @@ impl SystemtenderMetricsClient {
             self.transport
                 .request("DELETE", &self.job_url(), None, Duration::from_secs(5))
         {
-            eprintln!("pushgateway group purge skipped: {e}");
+            log::info!("pushgateway group purge skipped: {e}");
         }
     }
 

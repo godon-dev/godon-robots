@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn golden_roundtrip() {
         let Ok(dsn) = std::env::var("LEDGER_TEST_DSN") else {
-            eprintln!("LEDGER_TEST_DSN not set — golden fixture test skipped");
+            log::info!("LEDGER_TEST_DSN not set — golden fixture test skipped");
             return;
         };
         let ledger = TrialLedger::new(&dsn).unwrap();

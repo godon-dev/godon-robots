@@ -571,14 +571,14 @@ impl<K: Coordinator> Worker<K> {
             .ensure_schema()
             .and_then(|_| ledger.count())
             .map_err(|e| {
-                eprintln!("ledger init failed: {e}");
+                log::info!("ledger init failed: {e}");
                 crate::worker::WorkerError::BadCreationTs(e.to_string())
             });
         let loaded = match loaded {
             Ok(n) => n,
             Err(e) => return Err(e),
         };
-        eprintln!("Ledger ready: {loaded} trials loaded");
+        log::info!("Ledger ready: {loaded} trials loaded");
 
         // target resolution
         let targets = config
@@ -592,7 +592,7 @@ impl<K: Coordinator> Worker<K> {
             targets[target_id as usize].clone()
         } else {
             if !targets.is_empty() {
-                eprintln!("Invalid target_id {target_id}, using first target");
+                log::info!("Invalid target_id {target_id}, using first target");
             }
             targets.first().cloned().unwrap_or(json!({}))
         };
@@ -602,8 +602,8 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if rollback_enabled {
-            eprintln!("Rollback enabled for target {target_id}");
-            eprintln!(
+            log::info!("Rollback enabled for target {target_id}");
+            log::info!(
                 "Rollback strategy: {}",
                 rollback_config
                     .get("strategy")
@@ -695,7 +695,7 @@ impl<K: Coordinator> Worker<K> {
             match neutral_dials.compute_neutral_params() {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("neutral-params hook read failed (parking None): {e}");
+                    log::info!("neutral-params hook read failed (parking None): {e}");
                     None
                 }
             }
@@ -727,7 +727,7 @@ impl<K: Coordinator> Worker<K> {
         let sleeper = self.sleeper.clone();
         std::thread::spawn(move || loop {
             if let Err(e) = beat_with_burst(&*own, interval, &*sleeper) {
-                eprintln!("heartbeat beat failed (retries next beat): {e}");
+                log::info!("heartbeat beat failed (retries next beat): {e}");
             }
             sleeper(interval);
         });
@@ -741,7 +741,7 @@ impl<K: Coordinator> Worker<K> {
             &self.systemtender_id,
             &self.cfg.group,
         ) {
-            eprintln!("Failed to register for interference detection: {e}");
+            log::info!("Failed to register for interference detection: {e}");
         }
     }
 
@@ -767,7 +767,7 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         });
         if let Err(e) = result {
-            eprintln!("Failed to publish standing params: {e}");
+            log::info!("Failed to publish standing params: {e}");
         }
     }
 
@@ -791,15 +791,14 @@ impl<K: Coordinator> Worker<K> {
     pub fn check_shutdown_requested(&self) -> bool {
         match self.ledger.stop_requested() {
             Ok(true) => {
-                eprintln!(
-                    "Stop flag is set for systemtender {}",
+                log::info!("Stop flag is set for systemtender {}",
                     self.cfg.systemtender_uuid
                 );
                 true
             }
             Ok(false) => false,
             Err(e) => {
-                eprintln!("Failed to check stop flag: {e}");
+                log::info!("Failed to check stop flag: {e}");
                 false
             }
         }
@@ -821,7 +820,7 @@ impl<K: Coordinator> Worker<K> {
                     let retryable = worker_is_retryable(&e.to_string());
                     if attempt < MAX_RETRIES - 1 && retryable {
                         let wait = 2f64.powi(attempt as i32);
-                        eprintln!(
+                        log::info!(
                             "{description} attempt {}/{} failed: {e}, retrying in {wait}s",
                             attempt + 1,
                             MAX_RETRIES
@@ -855,7 +854,7 @@ impl<K: Coordinator> Worker<K> {
                     let retryable = worker_is_retryable(&e.to_string());
                     if attempt < MAX_RETRIES - 1 && retryable {
                         let wait = 2f64.powi(attempt as i32);
-                        eprintln!(
+                        log::info!(
                             "{description} attempt {}/{} failed: {e}, retrying in {wait}s",
                             attempt + 1,
                             MAX_RETRIES
@@ -934,7 +933,7 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|m| m.as_object())
             .unwrap_or(&empty);
         if metrics.is_empty() {
-            eprintln!("No metrics returned from reconnaissance");
+            log::info!("No metrics returned from reconnaissance");
             return Ok(self.inf_objectives());
         }
         let mut out = BTreeMap::new();
@@ -974,8 +973,7 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or("ssh")
             .to_string();
         let effectuator_path = format!("f/effectuation/{eff_type}");
-        eprintln!(
-            "Effectuating {} targets via {effectuator_path} with settings: {:?}",
+        log::info!("Effectuating {} targets via {effectuator_path} with settings: {:?}",
             targets.as_array().map(|a| a.len()).unwrap_or(0),
             settings.keys().collect::<Vec<_>>()
         );
@@ -988,11 +986,11 @@ impl<K: Coordinator> Worker<K> {
         let eff_result = match self.wmill.run_script_by_path(&effectuator_path, &args) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Trial execution failed: {e}");
+                log::info!("Trial execution failed: {e}");
                 return Ok(self.inf_objectives());
             }
         };
-        eprintln!(
+        log::info!(
             "Effectuation completed: {}",
             eff_result
                 .get("status")
@@ -1023,7 +1021,7 @@ impl<K: Coordinator> Worker<K> {
                         .collect()
                 })
                 .unwrap_or_default();
-            eprintln!("Effectuation completely failed for all targets: {failed_targets:?}");
+            log::info!("Effectuation completely failed for all targets: {failed_targets:?}");
             return Err(format!(
                 "Effectuation failed for all targets: {failed_targets:?}"
             ));
@@ -1044,7 +1042,7 @@ impl<K: Coordinator> Worker<K> {
                         .collect()
                 })
                 .unwrap_or_default();
-            eprintln!(
+            log::info!(
                 "Effectuation partially failed: {failed}/{} targets succeeded. Failed: {failed_targets:?}",
                 successful + failed
             );
@@ -1052,7 +1050,7 @@ impl<K: Coordinator> Worker<K> {
         match self.run_reconnaissance(settings) {
             Ok(metrics) => Ok(metrics),
             Err(e) => {
-                eprintln!("Trial execution failed: {e}");
+                log::info!("Trial execution failed: {e}");
                 Ok(self.inf_objectives())
             }
         }
@@ -1077,11 +1075,11 @@ impl<K: Coordinator> Worker<K> {
                 .unwrap_or("unknown");
             let hard_limit = guardrail.get("hard_limit");
             let Some(hard_limit) = hard_limit else {
-                eprintln!("Guardrail '{name}' missing hard_limit, skipping");
+                log::info!("Guardrail '{name}' missing hard_limit, skipping");
                 continue;
             };
             let Some(&metric_value) = metrics.get(name) else {
-                eprintln!("Guardrail '{name}' metric not found in metrics, skipping check");
+                log::info!("Guardrail '{name}' metric not found in metrics, skipping check");
                 continue;
             };
             if let Some(limit) = hard_limit.as_f64() {
@@ -1091,11 +1089,11 @@ impl<K: Coordinator> Worker<K> {
                         py_float_str(metric_value),
                         py_float_str(limit)
                     );
-                    eprintln!("{msg}");
+                    log::info!("{msg}");
                     violations.push(msg);
                 }
             } else {
-                eprintln!("Guardrail '{name}' has non-numeric hard_limit, skipping");
+                log::info!("Guardrail '{name}' has non-numeric hard_limit, skipping");
             }
         }
         (!violations.is_empty(), violations)
@@ -1113,7 +1111,7 @@ impl<K: Coordinator> Worker<K> {
             Ok(Some(_)) => return, // already initialized
             Ok(None) => {}
             Err(e) => {
-                eprintln!("rollback state read failed: {e}");
+                log::info!("rollback state read failed: {e}");
                 return;
             }
         }
@@ -1125,8 +1123,7 @@ impl<K: Coordinator> Worker<K> {
             "version": 0,
         });
         let _ = self.ledger.state_put(&key, &py_dumps(&initial)); // sorted vs python's insertion order — round-trips, nothing pins these bytes
-        eprintln!(
-            "Initialized rollback state for target {}: {initial}",
+        log::info!("Initialized rollback state for target {}: {initial}",
             self.target_id
         );
     }
@@ -1136,7 +1133,7 @@ impl<K: Coordinator> Worker<K> {
         let existing = match self.ledger.state_get(&key) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("rollback state read failed: {e}");
+                log::info!("rollback state read failed: {e}");
                 None
             }
         };
@@ -1146,8 +1143,7 @@ impl<K: Coordinator> Worker<K> {
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default(),
             None => {
-                eprintln!(
-                    "No rollback state found for target {}, initializing",
+                log::info!("No rollback state found for target {}, initializing",
                     self.target_id
                 );
                 self.init_rollback_state();
@@ -1174,7 +1170,7 @@ impl<K: Coordinator> Worker<K> {
             .ledger
             .state_put(&key, &py_dumps(&Value::Object(new_state.clone())))
         {
-            eprintln!("rollback state write failed: {e}");
+            log::info!("rollback state write failed: {e}");
             return false;
         }
         true
@@ -1202,8 +1198,7 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.as_i64())
             .unwrap_or(3);
         if consecutive >= threshold {
-            eprintln!(
-                "Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
+            log::info!("Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
             );
             return true;
         }
@@ -1211,7 +1206,7 @@ impl<K: Coordinator> Worker<K> {
     }
 
     pub fn execute_rollback(&mut self) -> Result<bool, String> {
-        eprintln!("Executing rollback for target {}", self.target_id);
+        log::info!("Executing rollback for target {}", self.target_id);
         let mut rollback_state = self.get_rollback_state();
         let strategy_name = self
             .rollback_config
@@ -1239,23 +1234,22 @@ impl<K: Coordinator> Worker<K> {
             match self.ledger.best_trial(self.dials.objective_minimizes()) {
                 Ok(Some(best)) => Some(best.params.as_object().cloned().unwrap_or_default()),
                 _ => {
-                    eprintln!("Cannot rollback to 'best': no best trial found");
+                    log::info!("Cannot rollback to 'best': no best trial found");
                     return Ok(false);
                 }
             }
         } else if target_state == "baseline" {
             Some(Map::new())
         } else {
-            eprintln!("Unknown target_state: {target_state}");
+            log::info!("Unknown target_state: {target_state}");
             return Ok(false);
         };
 
         let Some(params_to_restore) = params_to_restore else {
-            eprintln!("No parameters to restore for target_state={target_state}");
+            log::info!("No parameters to restore for target_state={target_state}");
             return Ok(false);
         };
-        eprintln!(
-            "Rolling back to {target_state} state with params: {:?}",
+        log::info!("Rolling back to {target_state} state with params: {:?}",
             params_to_restore.keys().collect::<Vec<_>>()
         );
 
@@ -1272,13 +1266,12 @@ impl<K: Coordinator> Worker<K> {
             "targets": [self.target.clone()],
             "settings": Value::Object(params_to_restore.clone()),
         });
-        eprintln!(
-            "Executing rollback effectuation for target {}",
+        log::info!("Executing rollback effectuation for target {}",
             self.target_id
         );
         match self.wmill.run_script_by_path(&effectuator_path, &args) {
             Ok(result) => {
-                eprintln!(
+                log::info!(
                     "Rollback effectuation completed: {}",
                     result.get("status").and_then(|s| s.as_str()).unwrap_or("-")
                 );
@@ -1290,7 +1283,7 @@ impl<K: Coordinator> Worker<K> {
                 Ok(true)
             }
             Err(e) => {
-                eprintln!("Rollback execution failed: {e}");
+                log::info!("Rollback execution failed: {e}");
                 self.metrics.inc_rollback("failed");
                 let _ = self.metrics.push();
                 let on_failure = strategy
@@ -1300,19 +1293,19 @@ impl<K: Coordinator> Worker<K> {
                     .to_string();
                 match on_failure.as_str() {
                     "stop" => {
-                        eprintln!("Rollback failed with on_failure=stop, halting trials");
+                        log::info!("Rollback failed with on_failure=stop, halting trials");
                         rollback_state.insert("state".into(), json!("failed"));
                         self.update_rollback_state(rollback_state);
                         Err(e)
                     }
                     "continue" => {
-                        eprintln!("Rollback failed with on_failure=continue, continuing trials");
+                        log::info!("Rollback failed with on_failure=continue, continuing trials");
                         rollback_state.insert("state".into(), json!("failed"));
                         self.update_rollback_state(rollback_state);
                         Ok(false)
                     }
                     "skip_target" => {
-                        eprintln!(
+                        log::info!(
                             "Rollback failed with on_failure=skip_target, marking target unhealthy"
                         );
                         rollback_state.insert("state".into(), json!("skip_target"));
@@ -1336,7 +1329,7 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or(0)
             + 1;
         state.insert("consecutive_failures".into(), json!(failures));
-        eprintln!("Guardrail violation detected. Consecutive failures: {failures}");
+        log::info!("Guardrail violation detected. Consecutive failures: {failures}");
         let needs = self.check_needs_rollback();
         let next = if needs { "needs_rollback" } else { "normal" };
         state.insert("state".into(), json!(next));
@@ -1375,7 +1368,7 @@ impl<K: Coordinator> Worker<K> {
         let assignment = match self.ledger.wish_latest() {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("Wish assignment check failed: {e}");
+                log::info!("Wish assignment check failed: {e}");
                 return;
             }
         };
@@ -1420,7 +1413,7 @@ impl<K: Coordinator> Worker<K> {
         match self.http.call("GET", &url, None, Duration::from_secs(10)) {
             Ok(v) => Some(v),
             Err(e) => {
-                eprintln!("Wish plan fetch failed for {wish_id}: {e:?}");
+                log::info!("Wish plan fetch failed for {wish_id}: {e:?}");
                 None
             }
         }
@@ -1465,7 +1458,7 @@ impl<K: Coordinator> Worker<K> {
                 moves: BTreeMap::new(),
                 probe: None,
             });
-            eprintln!(
+            log::info!(
                 "Wish {wish_id} adopted as RECEIVER: parking at neutral, publishing readings for the judge"
             );
             return;
@@ -1486,7 +1479,7 @@ impl<K: Coordinator> Worker<K> {
             }
         }
         if own.is_empty() {
-            eprintln!("Wish {wish_id}: plan names no move for this tender — staying put");
+            log::info!("Wish {wish_id}: plan names no move for this tender — staying put");
             return;
         }
         let instruction = plan
@@ -1495,7 +1488,7 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or("hold")
             .to_string();
         let dials: Vec<String> = own.iter().map(|(p, s)| format!("{p}={s}")).collect();
-        eprintln!(
+        log::info!(
             "Wish {wish_id} adopted: holding {} dial(s) ({}) (instruction: {instruction})",
             own.len(),
             dials.join(", ")
@@ -1538,7 +1531,7 @@ impl<K: Coordinator> Worker<K> {
                 } else {
                     format!(" ({})", refused.detail)
                 };
-                eprintln!(
+                log::info!(
                     "Wish {wish_id} refused at the door: {}{detail} — never bound, never half-run",
                     refused.reason
                 );
@@ -1559,7 +1552,7 @@ impl<K: Coordinator> Worker<K> {
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        eprintln!(
+        log::info!(
             "Wish {wish_id} adopted as SEEK: form={}, dials=[{dials}], budget={}, candidates={}",
             seek_plan.form, seek_plan.budget, seek_plan.candidates
         );
@@ -1623,7 +1616,7 @@ impl<K: Coordinator> Worker<K> {
         let result = match driver.result() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Seek {wish_id}: no result to write ({e})");
+                log::info!("Seek {wish_id}: no result to write ({e})");
                 self.release_wish(true);
                 return;
             }
@@ -1633,9 +1626,9 @@ impl<K: Coordinator> Worker<K> {
         if let Err(e) = self.retry_op(&format!("ledger.state_put seek_return ({wish_id})"), || {
             self.ledger.state_put(&key, &payload)
         }) {
-            eprintln!("Seek return write failed for {wish_id}: {e}");
+            log::info!("Seek return write failed for {wish_id}: {e}");
         }
-        eprintln!(
+        log::info!(
             "Wish {wish_id} RETURNED: stop={}, spend={}, finding={}",
             result
                 .get("stop_reason")
@@ -1663,7 +1656,7 @@ impl<K: Coordinator> Worker<K> {
         let mut client = match (self.remote_db)(&url) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Wish {wish_id}: receiver notification failed: {e}");
+                log::info!("Wish {wish_id}: receiver notification failed: {e}");
                 return;
             }
         };
@@ -1690,11 +1683,11 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         })();
         match result {
-            Ok(()) => eprintln!(
+            Ok(()) => log::info!(
                 "Wish {wish_id}: receiver notified ({})",
                 &receiver.chars().take(8).collect::<String>()
             ),
-            Err(e) => eprintln!("Wish {wish_id}: receiver notification failed: {e}"),
+            Err(e) => log::info!("Wish {wish_id}: receiver notification failed: {e}"),
         }
     }
 
@@ -1721,7 +1714,7 @@ impl<K: Coordinator> Worker<K> {
         let mut client = match (self.remote_db)(&url) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Wish {wish_id}: receiver row cleanup failed: {e}");
+                log::info!("Wish {wish_id}: receiver row cleanup failed: {e}");
                 return;
             }
         };
@@ -1729,7 +1722,7 @@ impl<K: Coordinator> Worker<K> {
             "DELETE FROM wish_assignments WHERE wish_id = $1",
             &[&wish_id],
         ) {
-            eprintln!("Wish {wish_id}: receiver row cleanup failed: {e}");
+            log::info!("Wish {wish_id}: receiver row cleanup failed: {e}");
         }
     }
 
@@ -1824,7 +1817,7 @@ impl<K: Coordinator> Worker<K> {
         if let Some(w) = self.wish.as_mut() {
             for (p, s) in mine {
                 if w.moves.get(&p) != Some(&s) {
-                    eprintln!(
+                    log::info!(
                         "Wish {} re-planned: {p} {:?} -> {s}",
                         w.wish_id,
                         w.moves.get(&p)
@@ -1843,21 +1836,21 @@ impl<K: Coordinator> Worker<K> {
         let Some(wish) = self.wish.clone() else {
             return;
         };
-        eprintln!("Wish {} released — reverting to neutral", wish.wish_id);
+        log::info!("Wish {} released — reverting to neutral", wish.wish_id);
         match self.dials.compute_neutral_params() {
             Ok(Some(neutral)) if !neutral.is_empty() => {
                 if let Err(e) = self.execute_trial(&neutral) {
-                    eprintln!("Neutral re-assertion on release failed: {e}");
+                    log::info!("Neutral re-assertion on release failed: {e}");
                 }
             }
             Err(e) => {
-                eprintln!("Neutral re-assertion on release failed: {e}");
+                log::info!("Neutral re-assertion on release failed: {e}");
             }
             _ => {}
         }
         if delete_assignment {
             if let Err(e) = self.ledger.wish_remove(&wish.wish_id) {
-                eprintln!("Wish assignment removal failed for {}: {e}", wish.wish_id);
+                log::info!("Wish assignment removal failed for {}: {e}", wish.wish_id);
             }
         }
         self.wish = None;
@@ -1930,7 +1923,7 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         });
         if let Err(e) = result {
-            eprintln!("instruments stamp failed (retries on next state refresh): {e}");
+            log::info!("instruments stamp failed (retries on next state refresh): {e}");
         }
     }
 
@@ -1954,11 +1947,10 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         });
         match result {
-            Ok(()) => eprintln!(
-                "Stamped finished_at for systemtender {}",
+            Ok(()) => log::info!("Stamped finished_at for systemtender {}",
                 self.systemtender_id
             ),
-            Err(e) => eprintln!("finished stamp failed (non-fatal): {e}"),
+            Err(e) => log::info!("finished stamp failed (non-fatal): {e}"),
         }
     }
 
@@ -1977,7 +1969,7 @@ impl<K: Coordinator> Worker<K> {
         let assignment = match self.ledger.wish_latest() {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("BOOT PARK: assignment read failed ({e}) - treating as bare boot");
+                log::info!("BOOT PARK: assignment read failed ({e}) - treating as bare boot");
                 None
             }
         };
@@ -1989,7 +1981,7 @@ impl<K: Coordinator> Worker<K> {
                 role
             };
             if role == "receiver" {
-                eprintln!("BOOT PARK: receiver of wish {wish_id} - stillness, parking neutral");
+                log::info!("BOOT PARK: receiver of wish {wish_id} - stillness, parking neutral");
             } else {
                 // the standing params live in the ROLLBACK STATE —
                 // python reads exactly this key, not the trials-based
@@ -2006,7 +1998,7 @@ impl<K: Coordinator> Worker<K> {
                                 .cloned();
                             match standing {
                                 Some(standing) => {
-                                    eprintln!(
+                                    log::info!(
                                         "BOOT PARK: resuming holder of wish {wish_id} \
                                          at last standing params ({} dials)",
                                         standing.len()
@@ -2014,23 +2006,23 @@ impl<K: Coordinator> Worker<K> {
                                     return Some(standing);
                                 }
                                 None => {
-                                    eprintln!(
+                                    log::info!(
                                         "BOOT PARK: wish {wish_id} held but no standing params - parking neutral"
                                     );
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("BOOT PARK: standing read failed ({e}) - parking neutral");
+                            log::info!("BOOT PARK: standing read failed ({e}) - parking neutral");
                         }
                     },
                     Ok(None) => {
-                        eprintln!(
+                        log::info!(
                             "BOOT PARK: wish {wish_id} held but no standing params - parking neutral"
                         );
                     }
                     Err(e) => {
-                        eprintln!("BOOT PARK: standing read failed ({e}) - parking neutral");
+                        log::info!("BOOT PARK: standing read failed ({e}) - parking neutral");
                     }
                 }
             }
@@ -2038,7 +2030,7 @@ impl<K: Coordinator> Worker<K> {
         match self.dials.compute_neutral_params() {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
+                log::info!(
                     "BOOT PARK: neutral computation failed ({e}) - skipping; the room may see boot state"
                 );
                 None
@@ -2055,14 +2047,14 @@ impl<K: Coordinator> Worker<K> {
     /// ledger (rung 8 — the death resume).
     pub fn park_before_announcement(&mut self) {
         let Some(target) = self.boot_park_params() else {
-            eprintln!("BOOT PARK: no park target - skipping");
+            log::info!("BOOT PARK: no park target - skipping");
             return;
         };
         if let Err(e) = self.execute_trial(&target) {
-            eprintln!("BOOT PARK: apply failed ({e}) - skipping; the room may see boot state");
+            log::info!("BOOT PARK: apply failed ({e}) - skipping; the room may see boot state");
             return;
         }
-        eprintln!(
+        log::info!(
             "BOOT PARK: {} dials applied before announcement",
             target.len()
         );
@@ -2074,7 +2066,7 @@ impl<K: Coordinator> Worker<K> {
         // stop flag read: a failed read is NOT a stop (python parity);
         // a noticed stop returns BEFORE the char read (python's order)
         if self.check_shutdown_requested() {
-            eprintln!("Stopping: Shutdown requested by controller");
+            log::info!("Stopping: Shutdown requested by controller");
             return Ok(false);
         }
         let wish_held = self.wish.is_some();
@@ -2091,7 +2083,7 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or(false);
         match should_continue(false, wish_held, walk_complete, pin_current) {
             Verdict::Stop(reason) => {
-                eprintln!("{reason}");
+                log::info!("{reason}");
                 Ok(false)
             }
             Verdict::Continue { pin_fired } => {
@@ -2102,8 +2094,7 @@ impl<K: Coordinator> Worker<K> {
                         .map(|w| w.wish_id.clone())
                         .unwrap_or_default();
                     self.pin_receipt = Some(wish_id.clone());
-                    eprintln!(
-                        "Characterization complete but wish {wish_id} held — pinning past walk-complete (guard): finished walkers leave, holders park"
+                    log::info!("Characterization complete but wish {wish_id} held — pinning past walk-complete (guard): finished walkers leave, holders park"
                     );
                 }
                 Ok(true)
@@ -2119,7 +2110,7 @@ impl<K: Coordinator> Worker<K> {
     /// neutral and its assignment row goes with it; the finished stamp
     /// lands. Every exit is a clean exit (guard, rung 7).
     pub fn run(&mut self) -> Result<(), String> {
-        eprintln!("Starting SystemtenderWorker: {}", self.cfg.worker_id());
+        log::info!("Starting SystemtenderWorker: {}", self.cfg.worker_id());
         self.metrics.purge_stale_series();
         let _ = self.metrics.push();
 
@@ -2127,7 +2118,7 @@ impl<K: Coordinator> Worker<K> {
         let result = self.run_trials(&mut trial_count);
 
         if let Err(ref run_err) = result {
-            eprintln!("Systemtender {} failed: {run_err}", self.systemtender_id);
+            log::info!("Systemtender {} failed: {run_err}", self.systemtender_id);
             // python's except-block state update: if THIS fails, its
             // error replaces the loop's
             if let Err(state_err) = self.update_state() {
@@ -2150,12 +2141,11 @@ impl<K: Coordinator> Worker<K> {
         if result.is_ok() {
             self.update_state()?;
             let count = self.ledger.count().map_err(|e| e.to_string())?;
-            eprintln!(
-                "SystemtenderWorker {} completed {count} trials",
+            log::info!("SystemtenderWorker {} completed {count} trials",
                 self.cfg.worker_id()
             );
             if let Ok(Some(best)) = self.ledger.best_trial(self.dials.objective_minimizes()) {
-                eprintln!(
+                log::debug!(
                     "Best trial: #{}, value={:?}, params={}",
                     best.number, best.value, best.params
                 );
@@ -2168,10 +2158,10 @@ impl<K: Coordinator> Worker<K> {
         while self.worker_should_continue()? {
             // rollback check, before the next trial
             if self.rollback_enabled && self.check_needs_rollback() {
-                eprintln!("Rollback needed, executing rollback before next trial");
+                log::info!("Rollback needed, executing rollback before next trial");
                 let rollback_success = self.execute_rollback()?;
                 if !rollback_success {
-                    eprintln!("Rollback failed, continuing with trials");
+                    log::info!("Rollback failed, continuing with trials");
                 }
                 let strategy_name = self
                     .rollback_config
@@ -2195,10 +2185,10 @@ impl<K: Coordinator> Worker<K> {
                         .get("duration")
                         .and_then(|d| d.as_i64())
                         .unwrap_or(300);
-                    eprintln!("Pausing for {duration} seconds after rollback");
+                    log::info!("Pausing for {duration} seconds after rollback");
                     (self.sleeper)(duration as f64);
                 } else if after_action == "stop" {
-                    eprintln!("Rollback completed with after.action=stop, halting trials");
+                    log::info!("Rollback completed with after.action=stop, halting trials");
                     break;
                 }
             }
@@ -2206,21 +2196,21 @@ impl<K: Coordinator> Worker<K> {
             // begin() sits outside the per-trial catch (python parity:
             // a begin failure kills the run, not the trial)
             let trial_number = self.ledger.begin().map_err(|e| e.to_string())?;
-            eprintln!("Trial {trial_number} started");
+            log::info!("Trial {trial_number} started");
             let trial_start = Instant::now();
 
             let body = self.run_trial_body(trial_number, trial_start);
             match body {
                 Err(e) => {
-                    eprintln!("Trial {trial_number} failed: {e}");
+                    log::info!("Trial {trial_number} failed: {e}");
                     let msg: String = e.chars().take(500).collect();
                     match self.retry_op(
                         &format!("ledger.fail recovery (trial {trial_number})"),
                         || self.ledger.fail(trial_number, Some(&msg)),
                     ) {
-                        Ok(()) => eprintln!("Trial {trial_number} marked as FAILED"),
+                        Ok(()) => log::info!("Trial {trial_number} marked as FAILED"),
                         Err(tell_err) => {
-                            eprintln!("Trial {trial_number} tell failed: {tell_err}")
+                            log::info!("Trial {trial_number} tell failed: {tell_err}")
                         }
                     }
                     self.metrics.inc_trial("failed", None);
@@ -2492,7 +2482,7 @@ impl<K: Coordinator> Worker<K> {
             _ => {
                 // FAIL to avoid effectuating anything the room did not
                 // decide.
-                eprintln!(
+                log::info!(
                     "Trial {trial_number}: mode={detection_mode} but no params from coordinator — FAILing"
                 );
                 self.retry_op(
@@ -2588,13 +2578,13 @@ impl<K: Coordinator> Worker<K> {
         }
 
         if guardrails_violated {
-            eprintln!("Trial {trial_number} failed guardrails: {violations:?}");
+            log::info!("Trial {trial_number} failed guardrails: {violations:?}");
             self.retry_op(
                 &format!("ledger.fail guardrail-refusal (trial {trial_number})"),
                 || self.ledger.fail(trial_number, Some("guardrail refusal")),
             )
             .map_err(|e| e.to_string())?;
-            eprintln!("Trial {trial_number} marked as FAILED (guardrail violation)");
+            log::info!("Trial {trial_number} marked as FAILED (guardrail violation)");
             for violation in &violations {
                 let guardrail_name = violation
                     .split(':')
@@ -2623,7 +2613,7 @@ impl<K: Coordinator> Worker<K> {
             .map(|(n, _)| n)
             .collect();
         if !missing.is_empty() {
-            eprintln!("Trial {trial_number} has None values for objectives: {missing:?}");
+            log::info!("Trial {trial_number} has None values for objectives: {missing:?}");
         }
         if !self.last_metric_noise.is_empty() {
             let noise = py_dumps(&Value::Object(
@@ -2672,7 +2662,7 @@ impl<K: Coordinator> Worker<K> {
                     let local = outcome.rsplit('/').next().unwrap_or(&outcome).to_string();
                     match metrics.get(&local) {
                         None => {
-                            eprintln!(
+                            log::info!(
                                 "Seek trial {trial_number}: criterion '{local}' absent from metrics"
                             );
                             (0.0, 0.0)
@@ -2720,7 +2710,7 @@ impl<K: Coordinator> Worker<K> {
             }
             if obj_readings.is_empty() {
                 // The publish silently skips on two gates; say WHICH.
-                eprintln!(
+                log::debug!(
                     "Receiver observation skipped: phase={obs_phase:?} metrics_keys={:?}",
                     metrics.keys().take(8).collect::<Vec<_>>()
                 );
@@ -2753,7 +2743,7 @@ impl<K: Coordinator> Worker<K> {
 
         let trial_duration = trial_start.elapsed().as_secs_f64();
         self.coordinator.record_trial_duration(trial_duration);
-        eprintln!("Trial {trial_number} completed with values: {values:?}");
+        log::info!("Trial {trial_number} completed with values: {values:?}");
 
         self.metrics
             .inc_trial("complete", values.first().copied().flatten());
@@ -2803,7 +2793,7 @@ pub fn beat_with_burst_fn(
                     Err(retry_exc) => last = retry_exc,
                 }
             }
-            eprintln!("heartbeat burst lost after retries: {last}");
+            log::info!("heartbeat burst lost after retries: {last}");
             Ok(())
         }
     }

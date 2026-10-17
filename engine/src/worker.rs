@@ -232,7 +232,7 @@ where
                 }
                 if !last.is_empty() {
                     // heartbeat beat failed (retries next beat)
-                    eprintln!("heartbeat beat failed (retries next beat): {last}");
+                    log::info!("heartbeat beat failed (retries next beat): {last}");
                 }
             }
         }

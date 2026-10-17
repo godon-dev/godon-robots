@@ -170,15 +170,15 @@ pub fn prometheus_query_with_retry(
             Err(PromErr::Retryable(e)) => {
                 if attempt < max_retries - 1 {
                     let delay = initial_delay * (2u32.pow(attempt) as f64);
-                    eprintln!("Query failed (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s...");
+                    log::info!("Query failed (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s...");
                     sleep(delay);
                 } else {
-                    eprintln!("Query failed after {max_retries} retries: {e}");
+                    log::info!("Query failed after {max_retries} retries: {e}");
                 }
                 last_exception = Some(e);
             }
             Err(PromErr::Fatal(e)) => {
-                eprintln!("Non-retryable query error: {e}");
+                log::info!("Non-retryable query error: {e}");
                 return Err(e);
             }
         }
@@ -218,13 +218,13 @@ pub fn gather_single_metric(
 ) -> f64 {
     let recon_service = recon_config.get("service").and_then(|s| s.as_str());
     if recon_service != Some("prometheus") {
-        eprintln!("Unsupported reconnaissance service: {recon_service:?}");
+        log::info!("Unsupported reconnaissance service: {recon_service:?}");
         return f64::INFINITY;
     }
     match gather_inner(conn, sleep, url, metric_name, recon_config) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Failed to gather metric {metric_name}: {e}");
+            log::info!("Failed to gather metric {metric_name}: {e}");
             f64::INFINITY
         }
     }
@@ -253,11 +253,11 @@ fn gather_inner(
         .unwrap_or(0.0);
 
     if stabilization_seconds > 0.0 {
-        eprintln!("Waiting {stabilization_seconds}s for network stabilization");
+        log::info!("Waiting {stabilization_seconds}s for network stabilization");
         sleep(stabilization_seconds);
-        eprintln!("Stabilization period completed");
+        log::info!("Stabilization period completed");
     }
-    eprintln!("Collecting {samples} samples with {interval}s interval");
+    log::info!("Collecting {samples} samples with {interval}s interval");
 
     let mut sample_values: Vec<Option<f64>> = Vec::new();
     for i in 0..samples {
@@ -284,11 +284,11 @@ fn gather_inner(
         .unwrap_or("median");
     let final_value = aggregate_samples(&sample_values, aggregation_method);
     if final_value == f64::INFINITY {
-        eprintln!("All samples returned NaN for {metric_name}");
+        log::info!("All samples returned NaN for {metric_name}");
         Ok(f64::INFINITY)
     } else {
         let valid = sample_values.iter().filter(|s| s.is_some()).count();
-        eprintln!(
+        log::debug!(
             "Metric {metric_name}: {final_value} (using {aggregation_method} of {valid} samples)"
         );
         Ok(final_value)
@@ -311,14 +311,14 @@ pub fn main(
     conn: &dyn PromConnect,
     sleep: &mut dyn FnMut(f64),
 ) -> Value {
-    eprintln!("Starting reconnaissance via Prometheus");
+    log::info!("Starting reconnaissance via Prometheus");
     let prometheus_url = context
         .get("reconnaissance")
         .and_then(|r| r.get("prometheus"))
         .and_then(|p| p.get("url"))
         .and_then(|u| u.as_str())
         .unwrap_or("http://localhost:9090");
-    eprintln!("Default Prometheus URL: {prometheus_url}");
+    log::info!("Default Prometheus URL: {prometheus_url}");
 
     let empty = Vec::new();
     let mut metric_data = Map::new();
@@ -330,25 +330,24 @@ pub fn main(
             .unwrap_or(&empty);
         for item in items {
             let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                eprintln!("Unnamed {section} entry skipped (no name)");
+                log::info!("Unnamed {section} entry skipped (no name)");
                 continue;
             };
-            eprintln!("Gathering {section} metric: {name}");
+            log::info!("Gathering {section} metric: {name}");
             let recon_config = item.get("reconnaissance").cloned().unwrap_or(json!({}));
             let entry_url = recon_config
                 .get("url")
                 .and_then(|u| u.as_str())
                 .unwrap_or(prometheus_url);
             if recon_config.get("url").is_some() {
-                eprintln!("Using per-entry Prometheus URL: {entry_url}");
+                log::info!("Using per-entry Prometheus URL: {entry_url}");
             }
             let value = gather_single_metric(conn, sleep, entry_url, name, &recon_config);
             metric_data.insert(name.to_string(), number_or_null(value));
         }
     }
 
-    eprintln!(
-        "Reconnaissance completed with {} metrics",
+    log::info!("Reconnaissance completed with {} metrics",
         metric_data.len()
     );
     json!({

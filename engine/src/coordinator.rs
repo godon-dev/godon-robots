@@ -296,7 +296,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             txn.execute(&sql, &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)])
                 .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to cleanup stale state: {e}");
+            log::info!("Failed to cleanup stale state: {e}");
             return;
         }
         if let Err(e) = self.exec(|txn| {
@@ -307,7 +307,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             )
             .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to cleanup stale state: {e}");
+            log::info!("Failed to cleanup stale state: {e}");
         }
     }
 
@@ -322,7 +322,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             )
             .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to publish demand: {e}");
+            log::info!("Failed to publish demand: {e}");
         }
     }
 
@@ -347,7 +347,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
         })
         .unwrap_or_else(|e| {
-            eprintln!("walk_pending_peers query failed ({e}) — assuming none");
+            log::info!("walk_pending_peers query failed ({e}) — assuming none");
             Vec::new()
         })
     }
@@ -379,7 +379,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(row.get::<_, i64>(0))
         })
         .unwrap_or_else(|e| {
-            eprintln!("live_peer_count query failed ({e}) — assuming contention");
+            log::info!("live_peer_count query failed ({e}) — assuming contention");
             1
         })
     }
@@ -482,7 +482,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     unparked.iter().map(|r| r.get::<_, String>(0)).collect();
                 let pending_ids: Vec<String> =
                     pending.iter().map(|r| r.get::<_, String>(0)).collect();
-                eprintln!(
+                log::info!(
                     "Lease acquire denied for {} (phase={}): holder={:?} \
                      heartbeat_age={:?} unparked_peers={:?} walk_pending_peers={:?}",
                     self.systemtender_id,
@@ -511,7 +511,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(true)
         })
         .unwrap_or_else(|e| {
-            eprintln!("Failed to acquire lease: {e}");
+            log::info!("Failed to acquire lease: {e}");
             false
         })
     }
@@ -530,7 +530,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(n > 0)
         })
         .unwrap_or_else(|e| {
-            eprintln!("Heartbeat failed: {e}");
+            log::info!("Heartbeat failed: {e}");
             false
         })
     }
@@ -552,8 +552,8 @@ impl<C: Connect> ProbeCoordinator<C> {
             .map(|_| ()).map_err(DbError::from)
         });
         match res {
-            Ok(()) => eprintln!("Released sender lease (token={token})"),
-            Err(e) => eprintln!("Failed to release lease: {e}"),
+            Ok(()) => log::info!("Released sender lease (token={token})"),
+            Err(e) => log::info!("Failed to release lease: {e}"),
         }
     }
 
@@ -601,7 +601,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             params.push(&token);
             txn.execute(&sql, &params[..]).map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to set lease phase: {e}");
+            log::info!("Failed to set lease phase: {e}");
         }
     }
 
@@ -626,7 +626,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             )
             .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to decrement budget: {e}");
+            log::info!("Failed to decrement budget: {e}");
         }
     }
 
@@ -645,7 +645,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             )
             .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Presence refresh failed: {e}");
+            log::info!("Presence refresh failed: {e}");
         }
     }
 
@@ -680,7 +680,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(row.get::<_, i64>(0) > 0)
         })
         .unwrap_or_else(|e| {
-            eprintln!(
+            log::info!(
                 "COORDINATION DB FAILURE (has_active_sender): {e} — degrading, probe protocol compromised"
             );
             false
@@ -715,7 +715,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
         })
         .unwrap_or_else(|e| {
-            eprintln!(
+            log::info!(
                 "COORDINATION DB FAILURE (get_lease_phase): {e} — degrading, probe protocol compromised"
             );
             None
@@ -739,7 +739,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             Ok(row.get::<_, i64>(0))
         })
         .unwrap_or_else(|e| {
-            eprintln!(
+            log::info!(
                 "COORDINATION DB FAILURE (count_active_systemtenders): {e} — assuming solo; if peers exist, coordination is LOST"
             );
             1

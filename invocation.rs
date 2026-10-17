@@ -154,7 +154,7 @@ fn preflight_value<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, S
 pub fn emit_result(result: &Value) {
     println!("{result}");
     if let Err(e) = write_result_file(std::path::Path::new("."), result) {
-        eprintln!(
+        log::info!(
             "result.json write failed ({e}) - the rail reads the file; stdout still carries the answer"
         );
     }
