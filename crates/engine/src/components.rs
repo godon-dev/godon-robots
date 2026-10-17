@@ -7,6 +7,9 @@
 //! Components:
 //! - `worker` — the trial loop (args: `{config, systemtender_id?,
 //!   run_id?, target_id?}`); returns the python main's summary.
+//! - `preflight` — the strain preflights the controller's create
+//!   executor calls (args: `{config}`; the strain type rides the
+//!   config — one binary serves every family path).
 //! - `recon-http` / `recon-prometheus` — the reconnaissance
 //!   components (args: `{context, targets, settings}`).
 //! - `effectuation-http` / `effectuation-ssh` — the effectuation
@@ -94,10 +97,73 @@ pub fn run_component(component: &str, args: &Value, deps: &ComponentDeps) -> Res
             &mut sleep_fn,
         )),
         "worker" => run_worker(args, deps),
+        "preflight" => {
+            // The controller's create executor calls the strain
+            // preflights at f/systemtender/strains/<family>/preflight
+            // with {"config": <the tender's config>}. The wrapper
+            // headers point every family path at this ONE arm; the
+            // strain type rides the config (the worker boot's own
+            // read). A RAISED preflight (python's TypeError
+            // fallthroughs, ported verbatim) is the door's Err — the
+            // job fails and the executor's warn-and-continue arm
+            // answers a failed run, python's shape.
+            let config = args
+                .get("config")
+                .cloned()
+                .ok_or_else(|| "preflight requires a config argument".to_string())?;
+            let strain_type = config
+                .get("systemtender")
+                .and_then(|s| s.get("type"))
+                .or_else(|| config.get("type"))
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| "preflight requires the strain type in the config".to_string())?;
+            match crate::strains::load_strain(strain_type)? {
+                crate::strains::Strain::LinuxPerformance => {
+                    preflight_value(strain_linux_performance::validate_config(&config))
+                }
+                crate::strains::Strain::BenchGreenhouse => {
+                    preflight_value(strain_bench_greenhouse::validate_config(&config))
+                }
+                crate::strains::Strain::BenchMicrogrid => {
+                    preflight_value(strain_bench_microgrid::validate_config(&config))
+                }
+                crate::strains::Strain::BenchGeneric => {
+                    preflight_value(strain_bench_generic::validate_config(&config))
+                }
+            }
+        }
         other => Err(format!(
-            "unknown component {other:?} (worker | recon-http | recon-prometheus | effectuation-http | effectuation-ssh)"
+            "unknown component {other:?} (worker | recon-http | recon-prometheus | effectuation-http | effectuation-ssh | preflight)"
         )),
     }
+}
+
+/// Serialize a strain preflight's verdict into the door's result
+/// value — the controller's executor reads `result: "SUCCESS"` off
+/// it (each family crate carries its own PreflightResult type; the
+/// envelope bytes are identical).
+fn preflight_value<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, String> {
+    r.and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+}
+
+/// The door's result emission: stdout for manual runs, and the
+/// result.json file the windmill image rail mounts at the working
+/// dir — on that rail THE FILE is the job result (stdout stays
+/// logs). Best-effort beside the stdout answer: an unwritable
+/// working dir (a debug exec) warns, and stdout still carries it.
+pub fn emit_result(result: &Value) {
+    println!("{result}");
+    if let Err(e) = write_result_file(std::path::Path::new("."), result) {
+        eprintln!(
+            "result.json write failed ({e}) - the rail reads the file; stdout still carries the answer"
+        );
+    }
+}
+
+/// Write the rail's result file into `dir`. Split out so the suite
+/// can pin the bytes without touching the crate tree.
+pub fn write_result_file(dir: &std::path::Path, result: &Value) -> std::io::Result<()> {
+    std::fs::write(dir.join("result.json"), result.to_string())
 }
 
 /// The worker arm — the python `main(config, systemtender_id,
@@ -301,5 +367,43 @@ mod tests {
     fn component_worker_requires_config() {
         let err = run_component("worker", &json!({}), &deps()).unwrap_err();
         assert!(err.contains("config"), "{err}");
+    }
+
+    #[test]
+    fn component_dispatches_preflight_to_the_strain_crate() {
+        // the controller's preflight call shape: {"config": <tender
+        // config>} — the strain type rides config.systemtender.type
+        let args = json!({
+            "config": {
+                "systemtender": {"name": "t", "type": "bench_greenhouse"},
+                "settings": {"greenhouse": {"zones": 2}},
+            }
+        });
+        let out = run_component("preflight", &args, &deps()).unwrap();
+        assert_eq!(out["result"], "SUCCESS", "{out}");
+    }
+
+    #[test]
+    fn component_preflight_refuses_unknown_strain() {
+        let args = json!({"config": {"systemtender": {"type": "nope"}, "settings": {}}});
+        let err = run_component("preflight", &args, &deps()).unwrap_err();
+        assert!(err.contains("Unknown strain type: 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn component_preflight_requires_config() {
+        let err = run_component("preflight", &json!({}), &deps()).unwrap_err();
+        assert_eq!(err, "preflight requires a config argument");
+    }
+
+    #[test]
+    fn result_file_carries_the_envelope_bytes() {
+        let dir = std::env::temp_dir().join(format!("engine-result-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = json!({"result": "SUCCESS", "data": {"message": "ok"}});
+        write_result_file(&dir, &result).unwrap();
+        let bytes = std::fs::read_to_string(dir.join("result.json")).unwrap();
+        assert_eq!(bytes, result.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

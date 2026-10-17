@@ -6,7 +6,7 @@
 
 use std::io::Read;
 
-use godon_engine::components::{run_component, ComponentDeps};
+use godon_engine::components::{emit_result, run_component, ComponentDeps};
 
 fn main() {
     let mut argv = std::env::args().skip(1);
@@ -14,7 +14,7 @@ fn main() {
         Some(c) => c,
         None => {
             eprintln!(
-                "usage: godon-engine <worker|recon-http|recon-prometheus|effectuation-http|effectuation-ssh> [args-json]"
+                "usage: godon-engine <worker|recon-http|recon-prometheus|effectuation-http|effectuation-ssh|preflight> [args-json]"
             );
             std::process::exit(2);
         }
@@ -45,9 +45,7 @@ fn main() {
     };
 
     match run_component(&component, &args, &deps) {
-        Ok(result) => {
-            println!("{result}");
-        }
+        Ok(result) => emit_result(&result),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
