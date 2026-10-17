@@ -14,7 +14,7 @@ The feeler protocol runs through all modes: touch gently (a bounded push), belie
 
 ## Architecture
 
-Trials are recorded in the engine's **ledger** — tables in the tender's own Postgres database, one connection per operation, shared between robots. Effectuation and reconnaissance run as Windmill scripts on the target systems: one-line header scripts with empty bodies, where the engine binary picks its component from the job path and reads its own job arguments. Walk policies read the causal notebook page for the system group to choose the next probe level.
+Trials are recorded in the engine's **ledger** — tables in the tender's own database, one connection per operation, shared between robots. Effectuation and reconnaissance run as Windmill scripts on the target systems: one-line header scripts with empty bodies, where the engine binary picks its component from the job path and reads its own job arguments. Walk policies read the causal notebook page for the system group to choose the next probe level.
 
 The system follows an **engine + strains** architecture: the engine (`engine/`) provides the generic trial loop — lifecycle, lease and turn-taking, guardrail checking, rollback, metrics, and the seek lane — while strains (`strains/`) encapsulate domain-specific knowledge (parameter registries, preflight validation, per-dial suggestion logic). The `wmill/` crate is the Windmill client (run script by path, set state, get variable).
 
