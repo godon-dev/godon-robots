@@ -97,15 +97,15 @@ pub fn http_get_with_retry(
             Err(ReconHttpErr::Retryable(e)) => {
                 if attempt < max_retries - 1 {
                     let delay = initial_delay * (2u32.pow(attempt) as f64);
-                    eprintln!("HTTP GET failed (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s...");
+                    log::info!("HTTP GET failed (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s...");
                     sleep(delay);
                 } else {
-                    eprintln!("HTTP GET failed after {max_retries} retries: {e}");
+                    log::info!("HTTP GET failed after {max_retries} retries: {e}");
                 }
                 last_exception = Some(e);
             }
             Err(ReconHttpErr::Fatal(e)) => {
-                eprintln!("Non-retryable HTTP error: {e}");
+                log::info!("Non-retryable HTTP error: {e}");
                 return Err(e);
             }
         }
@@ -235,7 +235,7 @@ fn take_sample(
         Some(k) => k,
         None => {
             // python: `None not in data` → the warning, a None sample
-            eprintln!("Key 'None' not found in response. Available keys: none");
+            log::info!("Key 'None' not found in response. Available keys: none");
             return Ok(None);
         }
     };
@@ -244,14 +244,14 @@ fn take_sample(
         None => {
             // python: `key in list_body` is a membership test → false
             // → the same missing-key warning path
-            eprintln!("Key '{key}' not found in response. Available keys: []");
+            log::info!("Key '{key}' not found in response. Available keys: []");
             return Ok(None);
         }
     };
     match obj.get(key) {
         None => {
             let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-            eprintln!("Key '{key}' not found in response. Available keys: {keys:?}");
+            log::info!("Key '{key}' not found in response. Available keys: {keys:?}");
             Ok(None)
         }
         Some(v) if v.is_null() => Ok(None),
@@ -272,7 +272,7 @@ pub fn gather_single_metric(
 ) -> GatherOut {
     let recon_service = recon_config.get("service").and_then(|s| s.as_str());
     if recon_service != Some("http") {
-        eprintln!("Unsupported reconnaissance service: {recon_service:?}");
+        log::info!("Unsupported reconnaissance service: {recon_service:?}");
         return GatherOut::failed();
     }
 
@@ -280,7 +280,7 @@ pub fn gather_single_metric(
     match out {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Failed to gather metric {metric_name}: {e}");
+            log::info!("Failed to gather metric {metric_name}: {e}");
             GatherOut::failed()
         }
     }
@@ -320,10 +320,10 @@ fn gather_inner(
         .unwrap_or(0.05);
 
     if stabilization_seconds > 0.0 {
-        eprintln!("Waiting {stabilization_seconds}s for stabilization");
+        log::info!("Waiting {stabilization_seconds}s for stabilization");
         sleep(stabilization_seconds);
     }
-    eprintln!("Collecting {min_samples}-{max_samples} samples from {url} (key={key:?})");
+    log::info!("Collecting {min_samples}-{max_samples} samples from {url} (key={key:?})");
 
     let mut sample_values: Vec<Option<f64>> = Vec::new();
     for i in 0..min_samples {
@@ -336,7 +336,7 @@ fn gather_inner(
     }
     while (sample_values.len() as u64) < max_samples {
         if sprt_sample_stable(&sample_values, cv_threshold) {
-            eprintln!(
+            log::debug!(
                 "Sample stability reached at {} samples (CV < {cv_threshold})",
                 sample_values.len()
             );
@@ -357,10 +357,10 @@ fn gather_inner(
     let noise_cv = compute_cv(&sample_values);
 
     if final_value == f64::INFINITY {
-        eprintln!("All samples returned invalid values for {metric_name}");
+        log::info!("All samples returned invalid values for {metric_name}");
     } else {
         let valid_count = sample_values.iter().filter(|s| s.is_some()).count();
-        eprintln!(
+        log::debug!(
             "Metric {metric_name}: {final_value} (using {aggregation_method} of {valid_count} samples, CV={noise_cv:.4})"
         );
     }
@@ -386,14 +386,14 @@ pub fn main(
     transport: &dyn ReconHttp,
     sleep: &mut dyn FnMut(f64),
 ) -> Value {
-    eprintln!("Starting HTTP reconnaissance");
+    log::info!("Starting HTTP reconnaissance");
     let global_url = context
         .get("reconnaissance")
         .and_then(|r| r.get("http"))
         .and_then(|h| h.get("url"))
         .and_then(|u| u.as_str())
         .unwrap_or("http://localhost:8090");
-    eprintln!("Default HTTP URL: {global_url}");
+    log::info!("Default HTTP URL: {global_url}");
 
     let empty = Vec::new();
     let mut metric_data = Map::new();
@@ -410,17 +410,17 @@ pub fn main(
                 // python keyed the dict with None and died at
                 // serialization; the rust component skips with the error
                 // line (recorded divergence, crate doc)
-                eprintln!("Unnamed {section} entry skipped (no name)");
+                log::info!("Unnamed {section} entry skipped (no name)");
                 continue;
             };
-            eprintln!("Gathering {section} metric: {name}");
+            log::info!("Gathering {section} metric: {name}");
             let recon_config = item.get("reconnaissance").cloned().unwrap_or(json!({}));
             let base_url = recon_config
                 .get("url")
                 .and_then(|u| u.as_str())
                 .unwrap_or(global_url);
             if recon_config.get("url").is_some() {
-                eprintln!("Using per-entry HTTP URL: {base_url}");
+                log::info!("Using per-entry HTTP URL: {base_url}");
             }
             let result = gather_single_metric(transport, sleep, base_url, name, &recon_config);
             metric_data.insert(name.to_string(), number_or_null(result.value));
@@ -445,7 +445,7 @@ pub fn main(
         if metric_data.contains_key(obs_name) {
             continue;
         }
-        eprintln!("Gathering observation metric: {obs_name}");
+        log::info!("Gathering observation metric: {obs_name}");
         let recon_config = observation
             .get("reconnaissance")
             .cloned()
@@ -461,8 +461,7 @@ pub fn main(
         }
     }
 
-    eprintln!(
-        "HTTP reconnaissance completed with {} metrics",
+    log::info!("HTTP reconnaissance completed with {} metrics",
         metric_data.len()
     );
 

@@ -13,6 +13,11 @@ use crate::invocation::{emit_result, run_component, ComponentDeps};
 use crate::router::run_platform_job;
 
 fn main() {
+    // Two tiers of stderr diagnostics: regular records always log;
+    // intense detail (per-probe, per-sample) needs RUST_LOG=debug.
+    // The result JSON on stdout is untouched.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let mut argv = std::env::args().skip(1);
     let component = match argv.next() {
         Some(c) => c,
@@ -25,14 +30,14 @@ fn main() {
                 let deps = match ComponentDeps::production() {
                     Ok(d) => d,
                     Err(e) => {
-                        eprintln!("component dependencies failed: {e}");
+                        log::info!("component dependencies failed: {e}");
                         std::process::exit(2);
                     }
                 };
                 match run_platform_job(&deps) {
                     Ok(result) => emit_result(&result),
                     Err(e) => {
-                        eprintln!("{e}");
+                        log::info!("{e}");
                         std::process::exit(1);
                     }
                 }
@@ -58,7 +63,7 @@ fn main() {
     let args: serde_json::Value = match serde_json::from_str(&args_raw) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("invalid args json: {e}");
+            log::info!("invalid args json: {e}");
             std::process::exit(2);
         }
     };
@@ -66,7 +71,7 @@ fn main() {
     let deps = match ComponentDeps::production() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("component dependencies failed: {e}");
+            log::info!("component dependencies failed: {e}");
             std::process::exit(2);
         }
     };
@@ -74,7 +79,7 @@ fn main() {
     match run_component(&component, &args, &deps) {
         Ok(result) => emit_result(&result),
         Err(e) => {
-            eprintln!("{e}");
+            log::info!("{e}");
             std::process::exit(1);
         }
     }

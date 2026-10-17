@@ -305,13 +305,13 @@ impl<C: Connect> ProbeCoordinator<C> {
         let det_cfg = self.det_cfg();
         if let Some(hold) = det_cfg.get("hold_params").and_then(|v| v.as_object()) {
             *self.hold_params_from_config.borrow_mut() = true;
-            eprintln!("Using config-specified hold params");
+            log::info!("Using config-specified hold params");
             *self.neutral_params.borrow_mut() = Some(hold.clone());
             return Some(hold.clone());
         }
         if let Some(compute) = self.hooks.compute_neutral_params.as_ref() {
             if let Some(params) = compute() {
-                eprintln!("Computed neutral hold params via callback");
+                log::info!("Computed neutral hold params via callback");
                 *self.neutral_params.borrow_mut() = Some(params.clone());
                 return Some(params);
             }
@@ -336,7 +336,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             params.insert(ub.name.clone(), v);
         }
         if !params.is_empty() {
-            eprintln!("Computed neutral hold params from midpoints (fallback)");
+            log::info!("Computed neutral hold params from midpoints (fallback)");
             *self.neutral_params.borrow_mut() = Some(params.clone());
         }
         Some(params)
@@ -427,7 +427,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                         h.remove(0);
                     }
                 }
-                eprintln!(
+                log::debug!(
                     "CAUSAL probe_result: param={} level={} rtt={}ms shift={} delta={} converged={}",
                     probe.param_name,
                     probe.level,
@@ -440,7 +440,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             }
             Err(e) => {
                 let rtt = t0.elapsed().as_secs_f64();
-                eprintln!(
+                log::info!(
                     "CAUSAL probe_result FAILED after {rtt:.1}s (timeout was {timeout:.1}s): {e:?} — continuing blind"
                 );
                 None
@@ -478,7 +478,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             )
             .map(|_| ()).map_err(DbError::from)
         }) {
-            eprintln!("Failed to record receiver observation: {e}");
+            log::info!("Failed to record receiver observation: {e}");
         }
     }
 
@@ -500,7 +500,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         // only thing that ever revisits it.
         if result.get("drift").and_then(|v| v.as_bool()).unwrap_or(false) {
             if self.converged_params.borrow().contains(param_name) {
-                eprintln!(
+                log::info!(
                     "UN-CONVERGE: {param_name} — probe disagreed with the curve beyond bars (drift flag); back into the walk"
                 );
             }
@@ -538,13 +538,13 @@ impl<C: Connect> ProbeCoordinator<C> {
                     .iter()
                     .filter(|g| g.get("unresolved").and_then(|v| v.as_bool()).unwrap_or(false))
                     .count();
-                eprintln!(
+                log::info!(
                     "CONVERGED: {param_name} (unresolved gaps priced out: {unresolved})"
                 );
             }
             self.converged_params.borrow_mut().insert(param_name.to_string());
         } else if converged {
-            eprintln!(
+            log::info!(
                 "CONVERGED but {blocking} gap(s) still priced above the bar — {param_name} stays in rotation (walk bisects the gaps)"
             );
         }
@@ -623,10 +623,10 @@ impl<C: Connect> ProbeCoordinator<C> {
                 &walk_bounds,
                 transport,
             )));
-            eprintln!("CHAR INIT: notebook walk (injected transport)");
+            log::info!("CHAR INIT: notebook walk (injected transport)");
         } else if ladder {
             *self.char_walk.borrow_mut() = Some(CharWalk::Ladder(CoverageWalk::new(&walk_bounds)));
-            eprintln!("CHAR INIT: legacy ladder (explicitly configured)");
+            log::info!("CHAR INIT: legacy ladder (explicitly configured)");
         } else {
             let policy = WalkPolicy::new(
                 &self.causal_url,
@@ -640,7 +640,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 policy.view(&param_names[0])?; // notebook must answer
             }
             *self.char_walk.borrow_mut() = Some(CharWalk::Notebook(policy));
-            eprintln!("CHAR INIT: notebook walk (causal reachable)");
+            log::info!("CHAR INIT: notebook walk (causal reachable)");
         }
 
         let floors = self
@@ -656,7 +656,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     .join(", ")
             })
             .unwrap_or_default();
-        eprintln!(
+        log::info!(
             "CHAR INIT: {} params, floors: {}, threshold={}",
             param_names.len(),
             floors,
@@ -708,7 +708,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 // causal named a dial this strain does not carry (stale
                 // plan, renamed param): drop the override, the walk
                 // resumes — never crash the loop on a stale hint.
-                eprintln!(
+                log::debug!(
                     "Probe override param unknown to this strain: {param_name} — clearing"
                 );
                 drop(ov_cell);
@@ -810,12 +810,12 @@ impl<C: Connect> ProbeCoordinator<C> {
                 // ground (rolling upgrade) — no debt can exist. Parking
                 // a tender on an answered page would be the dark-view
                 // sin inverted.
-                eprintln!("AMBIENCE DUTY: notebook has no duty page ({code}) — no debt");
+                log::info!("AMBIENCE DUTY: notebook has no duty page ({code}) — no debt");
                 *self.ambience_debt_cache.borrow_mut() = Some((now, Vec::new()));
                 Some(Vec::new())
             }
             Err(e) => {
-                eprintln!("AMBIENCE DUTY: consult dark ({e:?}) — parking the question");
+                log::info!("AMBIENCE DUTY: consult dark ({e:?}) — parking the question");
                 None
             }
         }
@@ -938,7 +938,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         // python: `entry.get('epoch') or 0` — missing and 0 both mean 0
         let epoch = entry.get("epoch").and_then(|v| v.as_i64()).unwrap_or(0);
         self.set_probe_override(&param, &levels, Some(anchor), Some(epoch));
-        eprintln!(
+        log::info!(
             "AMBIENCE DUTY: param={param} anchor={anchor} window={} reason={} levels={} epoch={epoch}",
             display(entry.get("window")),
             display(entry.get("reason")),
@@ -958,13 +958,13 @@ impl<C: Connect> ProbeCoordinator<C> {
         result: Option<&Value>,
     ) -> Result<(), CoordError> {
         let Some(result) = result else {
-            eprintln!("CHAR TELL: {param_name} FAIL (causal unavailable)");
+            log::info!("CHAR TELL: {param_name} FAIL (causal unavailable)");
             return Ok(());
         };
         let z = result.get("z").and_then(|v| v.as_f64());
         let delta = result.get("delta").and_then(|v| v.as_f64());
         if let Some(z) = z {
-            eprintln!(
+            log::info!(
                 "CHAR TELL: {param_name} z={z:.3} (delta={} drift={} bar={})",
                 display(result.get("delta")),
                 display(result.get("drift")),
@@ -975,14 +975,14 @@ impl<C: Connect> ProbeCoordinator<C> {
             // (f64::MAX/2 ≈ 8.99e+307 → 1.0).
             let mut value = delta;
             if value > 1e10 {
-                eprintln!(
+                log::info!(
                     "CHAR TELL: catching INFINITY delta={value:.2e} → replacing with 1.0 (first point, no prior)"
                 );
                 value = 1.0;
             }
-            eprintln!("CHAR TELL: {param_name} delta={value:.6}");
+            log::info!("CHAR TELL: {param_name} delta={value:.6}");
         } else {
-            eprintln!("CHAR TELL: {param_name} FAIL (no z, no delta)");
+            log::info!("CHAR TELL: {param_name} FAIL (no z, no delta)");
             return Ok(());
         }
 
@@ -1004,7 +1004,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                         Some(v) => match v.as_f64() {
                             Some(f) => f,
                             None => {
-                                eprintln!("CHAR TELL: {recv} (unparseable entry)");
+                                log::info!("CHAR TELL: {recv} (unparseable entry)");
                                 continue;
                             }
                         },
@@ -1014,7 +1014,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                         Some(v) => match v.as_f64() {
                             Some(f) => f,
                             None => {
-                                eprintln!("CHAR TELL: {recv} (unparseable entry)");
+                                log::info!("CHAR TELL: {recv} (unparseable entry)");
                                 continue;
                             }
                         },
@@ -1024,7 +1024,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     } else {
                         " "
                     };
-                    eprintln!(
+                    log::info!(
                         "CHAR TELL:{marker} {recv} ch={} shift={shift:+.4} z={zv:.3} conv={} gaps={}",
                         display(entry("primary_channel")),
                         display(entry("converged")),
@@ -1051,7 +1051,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                         .join(", ")
                 })
                 .unwrap_or_default();
-            eprintln!(
+            log::info!(
                 "CHAR PROGRESS: {progress} levels, {}/{} params converged",
                 converged.len(),
                 param_names.len()
@@ -1064,7 +1064,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 }
             };
             if !can {
-                eprintln!("CHAR EXHAUSTED: walk complete at current floors");
+                log::info!("CHAR EXHAUSTED: walk complete at current floors");
                 self.refine_study()?;
             }
         }
@@ -1089,7 +1089,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     // worker job). Not complete — the loop lives and
                     // asks again next trial.
                     Err(WalkError::Unavailable(e)) => {
-                        eprintln!("CHAR COMPLETE: view unavailable ({e}) — retrying next trial");
+                        log::info!("CHAR COMPLETE: view unavailable ({e}) — retrying next trial");
                         return Ok(false);
                     }
                     Err(loud) => return Err(loud.into()),
@@ -1104,7 +1104,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         match self.ambience_unmeasured_pending() {
             Ok(pending) => Ok(!pending),
             Err(WalkError::Unavailable(e)) => {
-                eprintln!("CHAR COMPLETE: view unavailable ({e}) — retrying next trial");
+                log::info!("CHAR COMPLETE: view unavailable ({e}) — retrying next trial");
                 Ok(false)
             }
             Err(loud) => Err(loud.into()),
@@ -1117,8 +1117,7 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// in causal's CurveRegistry throughout.
     pub(crate) fn refine_study(&self) -> Result<(), CoordError> {
         if *self.refinement_level.borrow() >= self.refinement_depth {
-            eprintln!(
-                "REFINEMENT: exhausted (depth={}) — accepting best effort",
+            log::info!("REFINEMENT: exhausted (depth={}) — accepting best effort",
                 self.refinement_depth
             );
             let mut converged = self.converged_params.borrow_mut();
@@ -1166,7 +1165,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 }
             }
         };
-        eprintln!(
+        log::debug!(
             "REFINEMENT: pass {} floors: {}",
             self.refinement_level.borrow(),
             new_floors.join(", ")
@@ -1183,7 +1182,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             *self.initialized.borrow_mut() = true;
         }
         let state = *self.state.borrow();
-        eprintln!(
+        log::debug!(
             "COORD trial={trial_number} state={} systemtender={}",
             state.as_str(),
             self.systemtender_id.chars().take(8).collect::<String>()
@@ -1191,7 +1190,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         // Heartbeat for sender states
         if matches!(state, CoordState::ProbePush | CoordState::ProbePause) && !self.heartbeat() {
-            eprintln!("Lost sender lease — returning to IDLE");
+            log::info!("Lost sender lease — returning to IDLE");
             *self.state.borrow_mut() = CoordState::Idle;
             return Ok(self.idle_result());
         }
@@ -1246,7 +1245,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         // Try to become sender
         if self.try_acquire_lease(CoordState::ProbePush.as_str()) {
-            eprintln!("Acquired lease — starting characterization");
+            log::info!("Acquired lease — starting characterization");
             *self.state.borrow_mut() = CoordState::ProbePush;
             *self.push_count.borrow_mut() = 0;
             *self.neutral_params.borrow_mut() = None; // force recompute
@@ -1271,7 +1270,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         let params = self.get_neutral_params();
         match params {
             None => {
-                eprintln!("PARK ({why}): no neutral params — trial will FAIL");
+                log::info!("PARK ({why}): no neutral params — trial will FAIL");
                 Decision::park(None)
             }
             Some(p) => Decision::park(Some(p)),
@@ -1299,7 +1298,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     // notebook is authoritative the moment it answers
                     // again.
                     Err(WalkError::Unavailable(e)) => {
-                        eprintln!("WALK PENDING: view unavailable ({e}) — staying engaged");
+                        log::info!("WALK PENDING: view unavailable ({e}) — staying engaged");
                         return Ok(true);
                     }
                     Err(loud) => return Err(loud),
@@ -1312,7 +1311,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         match self.ambience_unmeasured_pending() {
             Ok(p) => Ok(p),
             Err(WalkError::Unavailable(e)) => {
-                eprintln!("WALK PENDING: view unavailable ({e}) — staying engaged");
+                log::info!("WALK PENDING: view unavailable ({e}) — staying engaged");
                 Ok(true)
             }
             Err(loud) => Err(loud),
@@ -1341,7 +1340,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     // 35224443449); advancing without the notebook is
                     // guessing — both are wrong, waiting is right.
                     Err(WalkError::Unavailable(e)) => {
-                        eprintln!(
+                        log::debug!(
                             "PROBE ASK: view unavailable ({e}) — skipping this trial boundary"
                         );
                         return Ok(self.idle_result());
@@ -1358,7 +1357,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     Ok(Some(p)) => probe = Some(p),
                     Ok(None) => {}
                     Err(WalkError::Unavailable(e)) => {
-                        eprintln!(
+                        log::info!(
                             "AMBIENCE DUTY: consult dark ({e}) — skipping this trial boundary"
                         );
                         return Ok(self.idle_result());
@@ -1377,7 +1376,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
             self.set_lease_phase(CoordState::ProbePush.as_str(), Some(self.push_block_size), None);
             *self.round_push_start.borrow_mut() = Some(Utc::now());
-            eprintln!(
+            log::debug!(
                 "PROBE_PUSH: param={} level={}",
                 probe.param_name, probe.level
             );
@@ -1435,7 +1434,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         *self.pause_count.borrow_mut() += 1;
         if *self.pause_count.borrow() >= self.pause_block_size {
             *self.round_pause_end.borrow_mut() = Some(Utc::now());
-            eprintln!(
+            log::debug!(
                 "PROBE_PAUSE: done for param={} level={}",
                 probe.param_name, probe.level
             );
@@ -1457,8 +1456,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 self.release_lease();
                 *self.state.borrow_mut() = CoordState::Cooldown;
                 *self.cooldown_count.borrow_mut() = 0;
-                eprintln!(
-                    "QUANTUM: {} cycles served — yielding lease (peer walk-pending); walk resumes from notebook",
+                log::info!("QUANTUM: {} cycles served — yielding lease (peer walk-pending); walk resumes from notebook",
                     self.quantum_cycles
                 );
                 return Ok(self.idle_result());
@@ -1489,8 +1487,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         let n_converged = self.converged_params.borrow().len();
         let n_total = self.param_names.borrow().len();
-        eprintln!(
-            "DONE: released lease. Converged {n_converged}/{n_total} params."
+        log::info!("DONE: released lease. Converged {n_converged}/{n_total} params."
         );
         Ok(self.idle_result())
     }
@@ -1510,9 +1507,9 @@ impl<C: Connect> ProbeCoordinator<C> {
                     .collect()
             };
             if !non_converged.is_empty() && self.walk_pending()? {
-                eprintln!("COOLDOWN: done — re-acquiring for more probes");
+                log::info!("COOLDOWN: done — re-acquiring for more probes");
                 if self.try_acquire_lease(CoordState::ProbePush.as_str()) {
-                    eprintln!(
+                    log::info!(
                         "Acquired lease — re-entry via cooldown (walk resumes from the notebook)"
                     );
                     *self.state.borrow_mut() = CoordState::ProbePush;
@@ -1520,7 +1517,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     return self.handle_probe_push(trial_number);
                 }
             }
-            eprintln!("COOLDOWN: done — back to IDLE");
+            log::info!("COOLDOWN: done — back to IDLE");
             *self.state.borrow_mut() = CoordState::Idle;
         }
         Ok(self.idle_result())
@@ -1533,14 +1530,14 @@ impl<C: Connect> ProbeCoordinator<C> {
         // or the group's own count starves and the rota freezes.
         self.refresh_presence();
         if !self.has_active_sender() {
-            eprintln!("HOLD: sender finished — back to IDLE");
+            log::info!("HOLD: sender finished — back to IDLE");
             *self.state.borrow_mut() = CoordState::Idle;
             return Ok(self.idle_result());
         }
 
         *self.hold_count.borrow_mut() += 1;
         if *self.hold_count.borrow() > MAX_HOLD_TRIALS {
-            eprintln!(
+            log::info!(
                 "HOLD: hit MAX_HOLD_TRIALS ({MAX_HOLD_TRIALS}) — returning to IDLE"
             );
             *self.state.borrow_mut() = CoordState::Idle;
@@ -1557,7 +1554,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         let log_it = *self.hold_count.borrow() % 5 == 1
             || phase != self.last_observed_phase.borrow().clone();
         if log_it {
-            eprintln!(
+            log::info!(
                 "HOLD: receiver trial {}, sender phase={}",
                 self.hold_count.borrow(),
                 phase.clone().unwrap_or_else(|| "None".to_string())

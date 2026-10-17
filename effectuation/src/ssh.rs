@@ -52,11 +52,10 @@ pub fn main(
         .unwrap_or(0.0);
 
     let targets = targets.as_array().cloned().unwrap_or_default();
-    eprintln!(
-        "SSH effectuation for {} targets via playbook {playbook_path}",
+    log::info!("SSH effectuation for {} targets via playbook {playbook_path}",
         targets.len()
     );
-    eprintln!("Settings: {}", settings_keys(settings));
+    log::info!("Settings: {}", settings_keys(settings));
 
     let mut all_results: Vec<Value> = Vec::new();
 
@@ -72,7 +71,7 @@ pub fn main(
             .cloned()
             .unwrap_or(Value::Null);
 
-        eprintln!("Processing target {target_id}: {address}");
+        log::info!("Processing target {target_id}: {address}");
 
         let target_vars = json!({
             "target_hostname": address,
@@ -100,7 +99,7 @@ pub fn main(
                 }
             }
             Err(e) => {
-                eprintln!("Failed to process target {target_id}: {e}");
+                log::info!("Failed to process target {target_id}: {e}");
                 json!({
                     "target_id": target_id,
                     "address": address,
@@ -113,7 +112,7 @@ pub fn main(
     }
 
     if stabilization_seconds > 0.0 {
-        eprintln!("Waiting {stabilization_seconds}s for system stabilization");
+        log::info!("Waiting {stabilization_seconds}s for system stabilization");
         sleep(stabilization_seconds);
     }
 
@@ -123,7 +122,7 @@ pub fn main(
         .count();
     let total_count = all_results.len();
 
-    eprintln!("Effectuation completed: {success_count}/{total_count} successful");
+    log::info!("Effectuation completed: {success_count}/{total_count} successful");
 
     json!({
         "status": "completed",
