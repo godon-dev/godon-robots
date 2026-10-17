@@ -20,7 +20,6 @@
 //! not shared code. Fixture parity is byte-exact, never approximate.
 
 pub mod characterization;
-pub mod components;
 pub mod coordinator;
 pub mod coordinator_walk;
 pub mod coverage_walk;

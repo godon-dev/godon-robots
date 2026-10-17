@@ -1,3 +1,33 @@
+[package]
+name = "godon-robots"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+description = "The tender body - the repo root is the platform entry (the godon-engine binary, the invocation surface, the router); the dirs below are the organ's part crates, wmill the outbound half of the seam"
+
+# The binary keeps the estate's name: the image ENTRYPOINT, the ci
+# smoke, and the windmill paths all say godon-engine - the package
+# boundary is repo structure, the artifact name is the contract.
+[[bin]]
+name = "godon-engine"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# the Serialize trait path for the preflight arm's passthrough bound
+serde = { version = "1", default-features = false }
+# the tender engine (the worker loop, the ledger, the Wmill trait)
+godon-engine = { path = "engine" }
+# the leaf libraries the dispatch serves
+godon_recon = { package = "godon-recon", path = "reconnaissance" }
+godon_effectuation = { package = "godon-effectuation", path = "effectuation" }
+godon_wmill = { package = "godon-wmill", path = "wmill" }
+# the strain families (the preflight arm dispatches into their crates)
+strain_bench_generic = { package = "godon-strain-bench-generic", path = "strains/bench_generic" }
+strain_bench_greenhouse = { package = "godon-strain-bench-greenhouse", path = "strains/bench_greenhouse" }
+strain_bench_microgrid = { package = "godon-strain-bench-microgrid", path = "strains/bench_microgrid" }
+strain_linux_performance = { package = "godon-strain-linux-performance", path = "strains/linux_performance" }
+
 [workspace]
 resolver = "2"
 members = [
@@ -11,12 +41,9 @@ members = [
     "effectuation",
 ]
 # The vessel rung-10 rust port (chime designs/2026-10-15-rung10-rust-port-plan.md).
-# Crates land WITH their ports, not empty: slice 8 brings the windmill
-# client (godon-wmill) and the reconnaissance/effectuation
-# components. The family
-# strain crates (rung 10 slice 7) carry the dial registries and
-# create-time preflights — cut along family lines so purpose profiles
-# stay one factory flag later.
+# The repo ROOT is the platform entry (the godon-engine binary); the
+# part crates live in the organ folders - the controller repo's own
+# shape, now the estate standard for every organ.
 
 [workspace.package]
 edition = "2021"

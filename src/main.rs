@@ -6,18 +6,45 @@
 
 use std::io::Read;
 
-use godon_engine::components::{emit_result, run_component, ComponentDeps};
+mod invocation;
+mod router;
+
+use crate::invocation::{emit_result, run_component, ComponentDeps};
+use crate::router::run_platform_job;
 
 fn main() {
     let mut argv = std::env::args().skip(1);
     let component = match argv.next() {
         Some(c) => c,
-        None => {
-            eprintln!(
-                "usage: godon-engine <worker|recon-http|recon-prometheus|effectuation-http|effectuation-ssh|preflight> [args-json]"
-            );
-            std::process::exit(2);
-        }
+        None => match std::env::var("WM_JOB_PATH") {
+            // the platform run: an empty-body sandbox script — the
+            // rail's reserved env carries the routing (WM_JOB_PATH)
+            // and the payload source (WM_JOB_ID); the binary is the
+            // entrypoint AND the router, no wrapper anywhere
+            Ok(_) => {
+                let deps = match ComponentDeps::production() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("component dependencies failed: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                match run_platform_job(&deps) {
+                    Ok(result) => emit_result(&result),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            Err(_) => {
+                eprintln!(
+                    "usage: godon-engine <worker|recon-http|recon-prometheus|effectuation-http|effectuation-ssh|preflight> [args-json]"
+                );
+                std::process::exit(2);
+            }
+        },
     };
     let args_raw = match argv.next() {
         Some(a) => a,

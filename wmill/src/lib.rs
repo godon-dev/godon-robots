@@ -110,6 +110,18 @@ impl WmillClient {
         ))
     }
 
+    /// The platform-run self-serve edge: this job's own args as the
+    /// caller passed them (GET jobs_u/get_args — the raw args JSON
+    /// rides the job row verbatim, keyed exactly as the caller sent).
+    pub fn get_job_args(&self, job_id: &str) -> Result<Value, String> {
+        let resp = self.check(self.http.get(
+            &format!("/w/{}/jobs_u/get_args/{}", self.workspace, job_id),
+            &[],
+        )?)?;
+        resp.json()
+            .ok_or_else(|| format!("invalid args body for job {job_id}"))
+    }
+
     /// Run a script by path and WAIT for its result — the python
     /// `run_script_by_path`: async run (job id from the response
     /// text) + the 0.5s result poll, unbounded, returning the job's

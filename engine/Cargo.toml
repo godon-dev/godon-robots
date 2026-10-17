@@ -14,9 +14,6 @@ path = "src/lib.rs"
 # connections on a sequential trial loop — one mechanism, ported 1:1.
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 serde_json = "1"
-# the Serialize trait path for the preflight arm's passthrough bound
-# (serde_json's own dependency; named directly, no features needed)
-serde = { version = "1", default-features = false }
 chrono = "0.4"
 # The seek wish's launch seed: sha256(wish_id)[:8] big-endian, the
 # python `hashlib.sha256` receipt verbatim (seek_wish.launch_seed).
