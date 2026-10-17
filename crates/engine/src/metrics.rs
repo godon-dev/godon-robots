@@ -4,7 +4,7 @@
 //! The python wrapped `prometheus_client` and pushed to the gateway.
 //! The rust body carries the same families (same names, same labels,
 //! same histogram buckets) as owned state plus a tiny exposition-text
-//! renderer, and pushes over an injected transport — the same seam
+//! renderer, and pushes over an injected transport — the same trait
 //! discipline as the causal HttpTransport. The pushgateway wire
 //! protocol is PUT text-exposition on `/metrics/job/{job}`, DELETE for
 //! the purge; the python client's `_created` companion series (a
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 /// The pushgateway edge: method, url, optional text body, timeout.
 /// The python used `push_to_gateway`/`urllib.request` directly; the
-/// seam is the rust replacement for exactly that edge.
+/// trait is the rust replacement for exactly that edge.
 pub trait PushTransport: Send + Sync {
     fn request(
         &self,

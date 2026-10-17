@@ -13,7 +13,7 @@
 //! The registry is COMPILED IN as its golden fixture
 //! ([`registry`]): one file, both suites — the python test holds its
 //! live dict to the checked-in bytes, this crate parses the same
-//! bytes as its data. Envelope strings are verbatim python.
+//! bytes as its data. Result strings are verbatim python.
 
 pub mod preflight;
 pub mod registry;

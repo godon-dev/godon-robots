@@ -6,8 +6,8 @@
 //! sits OUTSIDE the try, so a null `meta` raises straight out of
 //! `main` — mirrored by `Err` carrying the raise text. Everything
 //! inside the try maps to `Ok(PreflightResult::Failure { .. })` with
-//! the `"Preflight validation error: {e}"` envelope, python's except
-//! verbatim. Envelope strings are byte-exact.
+//! the `"Preflight validation error: {e}"` result, python's except
+//! verbatim. Result strings are byte-exact.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -504,8 +504,8 @@ mod tests {
     }
 
     #[test]
-    fn error_envelope_is_verbatim_python() {
-        // the aggregated envelope, byte-exact against the python shape
+    fn error_result_is_verbatim_python() {
+        // the aggregated result, byte-exact against the python shape
         let config = json!({
             "settings": {"greenhouse": {"zones": 2, "shading": {}}}
         });

@@ -4,15 +4,15 @@
 //! stamps), landing against the spine (`worker.rs`) and the
 //! coordinator slices.
 //!
-//! SEAMS, explicit (nothing faked; each lands in its own slice):
-//! - `LedgerGate` — the ledger verbs the worker speaks. `TrialLedger`
+//! INJECTED TRAITS, explicit (nothing faked; each lands in its own slice):
+//! - `Ledger` — the ledger verbs the worker speaks. `TrialLedger`
 //!   implements it; tests inject a recording fake exactly where the
 //!   python tests patched the ledger object.
-//! - `CoordGate` — the coordinator surface the loop drives (the
+//! - `Coordinator` — the coordinator surface the loop drives (the
 //!   python duck-typed the same methods, and its tests stubbed them).
-//! - `WmillGate` — windmill's script runner + set_state. The real
+//! - `Wmill` — windmill's script runner + set_state. The real
 //!   client (`godon_wmill`) landed with the recon/effectuation
-//!   leaves (slice 8); the trait stays as the tests' injection
+//!   components (slice 8); the trait stays as the tests' injection
 //!   surface.
 //! - own/shared db `Connect` — beats, stamps, registration, standing
 //!   params; the same short-connection shapes the python wrote.
@@ -22,10 +22,10 @@
 //! RUNG-8 EXCLUSION (recorded): the python boot park's
 //! standing-params resume — the death-resume path — ports LAST, after
 //! its flight settles. This body parks at neutral on a bare boot, the
-//! pre-rung-8 shape; `park_before_announcement` carries the seam where
+//! pre-rung-8 shape; `park_before_announcement` carries the place where
 //! the resume branch lands.
 //!
-//! Known seam divergences (python reference vs landed rust seams):
+//! Known divergences (python reference vs landed rust):
 //! - `CoordHooks::compute_neutral_params` returns Option, not Result —
 //!   a DB error at the coordinator's char-init reads None and the walk
 //!   falls back to hold params (python failed the trial loudly). Same
@@ -74,11 +74,11 @@ fn worker_is_retryable(text: &str) -> bool {
     WORKER_RETRYABLE_PATTERNS.iter().any(|p| text.contains(p))
 }
 
-// ─── the ledger seam ──────────────────────────────────────────────
+// ─── the ledger trait ─────────────────────────────────────────────
 
 /// The ledger verbs the worker speaks — the python worker called these
 /// on its TrialLedger; the rust tests patch exactly this surface.
-pub trait LedgerGate {
+pub trait Ledger {
     fn ensure_schema(&self) -> Result<i32, DbError>;
     fn count(&self) -> Result<i64, DbError>;
     fn trials(&self) -> Result<Vec<TrialRecord>, DbError>;
@@ -95,7 +95,7 @@ pub trait LedgerGate {
     fn wish_remove(&self, wish_id: &str) -> Result<(), DbError>;
 }
 
-impl<C: Connect> LedgerGate for TrialLedger<C> {
+impl<C: Connect> Ledger for TrialLedger<C> {
     fn ensure_schema(&self) -> Result<i32, DbError> {
         TrialLedger::ensure_schema(self)
     }
@@ -148,11 +148,11 @@ impl Connect for Arc<dyn Connect + Send + Sync> {
     }
 }
 
-// ─── the coordinator seam ─────────────────────────────────────────
+// ─── the coordinator trait ────────────────────────────────────────
 
 /// The coordinator surface the trial loop drives — the python's
 /// duck-typed methods; the walk-half struct implements it.
-pub trait CoordGate {
+pub trait Coordinator {
     fn decide_trial(&self, trial_number: i64) -> Result<Decision, CoordError>;
     fn get_state(&self) -> CoordState;
     fn get_char_status(&self) -> Value;
@@ -167,7 +167,7 @@ pub trait CoordGate {
     fn record_trial_duration(&self, duration_secs: f64);
 }
 
-impl<C: Connect> CoordGate for ProbeCoordinator<C> {
+impl<C: Connect> Coordinator for ProbeCoordinator<C> {
     fn decide_trial(&self, trial_number: i64) -> Result<Decision, CoordError> {
         self.decide_trial(trial_number)
     }
@@ -197,19 +197,19 @@ impl<C: Connect> CoordGate for ProbeCoordinator<C> {
     }
 }
 
-// ─── the windmill seam ────────────────────────────────────────────
+// ─── the windmill client ──────────────────────────────────────────
 
 /// The platform edge: run a script by path (the recon and effectuation
-/// leaves) and set the job state. The real client (`godon_wmill`,
+/// components) and set the job state. The real client (`godon_wmill`,
 /// slice 8) implements this behind the same methods the python
 /// `wmill` module exposed; tests inject fakes exactly where the
 /// python tests patched the module.
-pub trait WmillGate: Send + Sync {
+pub trait Wmill: Send + Sync {
     fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String>;
     fn set_state(&self, state: &Value) -> Result<(), String>;
 }
 
-impl WmillGate for godon_wmill::WmillClient {
+impl Wmill for godon_wmill::WmillClient {
     fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String> {
         godon_wmill::WmillClient::run_script_by_path(self, path, args)
     }
@@ -225,7 +225,7 @@ impl WmillGate for godon_wmill::WmillClient {
 /// directly. One source, both callers.
 pub struct DialSource {
     pub config: Value,
-    pub ledger: Arc<dyn LedgerGate + Send + Sync>,
+    pub ledger: Arc<dyn Ledger + Send + Sync>,
 }
 
 impl DialSource {
@@ -439,15 +439,15 @@ fn unix_now() -> f64 {
 
 // ─── the worker ───────────────────────────────────────────────────
 
-/// The worker's injected edges. The production sources (DsnConnect on
+/// The worker's injected dependencies. The production sources (DsnConnect on
 /// the libpq/shared urls, ReqwestTransport, the godon-wmill client)
-/// build via [`WorkerSeams::production`]; tests inject fakes.
-pub struct WorkerSeams {
+/// build via [`WorkerDeps::production`]; tests inject fakes.
+pub struct WorkerDeps {
     /// the tender's own db (beats, instruments, finished stamps)
     pub own_db: Arc<dyn Connect + Send + Sync>,
     /// the archive/shared db (registration, standing params)
     pub shared_db: Arc<dyn Connect + Send + Sync>,
-    pub wmill: Arc<dyn WmillGate>,
+    pub wmill: Arc<dyn Wmill>,
     pub http: Arc<dyn HttpTransport>,
     pub push_transport: Arc<dyn PushTransport>,
     /// connect by URL — the receiver-notification rows
@@ -455,19 +455,19 @@ pub struct WorkerSeams {
     /// every internal sleep (retry ladders, bursts) — tests fast-forward
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
 }
-impl WorkerSeams {
+impl WorkerDeps {
     /// Everything but the wmill client, from the environment exactly
     /// as the python derived it. `tender_db` is the ledger's own
     /// database name (`systemtender_{uuid}`). The wmill client is
     /// passed in — the caller builds `godon_wmill::WmillClient::
     /// from_env` (the binary's main does exactly that).
-    pub fn production(wmill: Arc<dyn WmillGate>, tender_db: &str) -> Self {
+    pub fn production(wmill: Arc<dyn Wmill>, tender_db: &str) -> Self {
         let pw = std::env::var("GODON_ARCHIVE_DB_PASSWORD").unwrap_or_else(|_| "postgres".into());
         let user = std::env::var("GODON_ARCHIVE_DB_USER").unwrap_or_else(|_| "postgres".into());
         let host =
             std::env::var("GODON_ARCHIVE_DB_SERVICE_HOST").unwrap_or_else(|_| "localhost".into());
         let port = std::env::var("GODON_ARCHIVE_DB_SERVICE_PORT").unwrap_or_else(|_| "5432".into());
-        WorkerSeams {
+        WorkerDeps {
             own_db: Arc::new(
                 crate::ledger::DsnConnect::new(&format!(
                     "postgresql://{user}:{pw}@{host}:{port}/{tender_db}"
@@ -510,17 +510,17 @@ pub struct HeldWish {
     pub probe: Option<(String, f64)>,
 }
 
-pub struct Worker<K: CoordGate> {
+pub struct Worker<K: Coordinator> {
     pub config: Value,
     pub cfg: WorkerConfig,
     pub systemtender_id: String,
-    pub ledger: Arc<dyn LedgerGate>,
+    pub ledger: Arc<dyn Ledger>,
     pub dials: Arc<DialSource>,
     pub coordinator: K,
     pub own_db: Arc<dyn Connect + Send + Sync>,
     pub shared_db: Arc<dyn Connect + Send + Sync>,
     pub remote_db: Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>,
-    pub wmill: Arc<dyn WmillGate>,
+    pub wmill: Arc<dyn Wmill>,
     pub http: Arc<dyn HttpTransport>,
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
     pub metrics: SystemtenderMetricsClient,
@@ -541,15 +541,15 @@ pub struct Worker<K: CoordGate> {
     pub last_metric_noise: BTreeMap<String, f64>,
 }
 
-impl<K: CoordGate> Worker<K> {
+impl<K: Coordinator> Worker<K> {
     /// The python `__init__` + `_init_body` order, one constructor:
     /// config parse, ledger init, heartbeat, coordinator wiring (the
     /// caller builds it against the same dial source), target
     /// resolution, rollback state, the boot park, registration, the
     /// first state update, metrics.
-    pub fn with_coordinator<L: LedgerGate + Send + Sync + 'static>(
+    pub fn with_coordinator<L: Ledger + Send + Sync + 'static>(
         config: Value,
-        seams: WorkerSeams,
+        deps: WorkerDeps,
         ledger: Arc<L>,
         coordinator: K,
     ) -> Result<Self, crate::worker::WorkerError> {
@@ -610,7 +610,7 @@ impl<K: CoordGate> Worker<K> {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(10.0);
 
-        let push_transport = seams.push_transport.clone();
+        let push_transport = deps.push_transport.clone();
         let systemtender_id = cfg.systemtender_uuid.clone();
         let worker_id = cfg.worker_id();
         let systemtender_type = cfg.systemtender_type.clone();
@@ -618,15 +618,15 @@ impl<K: CoordGate> Worker<K> {
             config,
             cfg,
             systemtender_id: systemtender_id.clone(),
-            ledger: ledger as Arc<dyn LedgerGate>,
+            ledger: ledger as Arc<dyn Ledger>,
             dials,
             coordinator,
-            own_db: seams.own_db.clone(),
-            shared_db: seams.shared_db.clone(),
-            remote_db: seams.remote_db.clone(),
-            wmill: seams.wmill.clone(),
-            http: seams.http.clone(),
-            sleeper: seams.sleeper.clone(),
+            own_db: deps.own_db.clone(),
+            shared_db: deps.shared_db.clone(),
+            remote_db: deps.remote_db.clone(),
+            wmill: deps.wmill.clone(),
+            http: deps.http.clone(),
+            sleeper: deps.sleeper.clone(),
             metrics: SystemtenderMetricsClient::new(
                 &systemtender_id,
                 &worker_id,
@@ -656,7 +656,7 @@ impl<K: CoordGate> Worker<K> {
         worker.start_heartbeat();
 
         // The first park BEFORE the room announcement (pre-rung-8
-        // shape: neutral on a bare boot; the death-resume seam lands
+        // shape: neutral on a bare boot; the death-resume paths land
         // with the rung-8 paths, after their flight).
         worker.park_before_announcement();
         worker.register_interference_systemtender();
@@ -667,21 +667,21 @@ impl<K: CoordGate> Worker<K> {
     /// Build the production coordinator against the shared db and this
     /// dial source — the python `_init_body`'s ProbeCoordinator(...)
     /// wiring, hooks included.
-    pub fn connect<L: LedgerGate + Send + Sync + 'static>(
+    pub fn connect<L: Ledger + Send + Sync + 'static>(
         config: Value,
-        seams: WorkerSeams,
+        deps: WorkerDeps,
         ledger: Arc<L>,
     ) -> Result<Worker<ProbeCoordinator<Arc<dyn Connect + Send + Sync>>>, crate::worker::WorkerError>
     {
         let dials = Arc::new(DialSource {
             config: config.clone(),
-            ledger: ledger.clone() as Arc<dyn LedgerGate + Send + Sync>,
+            ledger: ledger.clone() as Arc<dyn Ledger + Send + Sync>,
         });
         let hooks_dials = dials.clone();
         let hooks = crate::coordinator_walk::CoordHooks::new(Arc::new(move |settings: &Value| {
             hooks_dials.collect_upper_bounds(settings)
         }));
-        // seam divergence recorded in the module doc: Option, not Result
+        // the divergence recorded in the module doc: Option, not Result
         let neutral_dials = dials.clone();
         let mut hooks = hooks;
         hooks.compute_neutral_params = Some(Arc::new(move || {
@@ -701,14 +701,14 @@ impl<K: CoordGate> Worker<K> {
                     .unwrap_or_else(|_| "unknown".to_string())
             ),
             &config,
-            seams.shared_db.clone(),
+            deps.shared_db.clone(),
             hooks,
         );
-        Worker::with_coordinator(config, seams, ledger, coordinator)
+        Worker::with_coordinator(config, deps, ledger, coordinator)
     }
 }
 
-impl<K: CoordGate> Worker<K> {
+impl<K: Coordinator> Worker<K> {
     // ─── liveness heartbeat ───────────────────────────────────────
 
     /// The parallel beater, daemon semantics: the thread outlives the
@@ -1051,7 +1051,7 @@ impl<K: CoordGate> Worker<K> {
         }
     }
 
-    /// Guardrail check against the recon's metrics — the refusal gate.
+    /// Guardrail check against the recon's metrics — the refusal check.
     pub fn check_guardrails(&self, metrics: &BTreeMap<String, f64>) -> (bool, Vec<String>) {
         let guardrails = self
             .config
@@ -1694,7 +1694,7 @@ impl<K: CoordGate> Worker<K> {
     /// The shared DSN's base (everything before the last '/'), for
     /// building per-receiver urls.
     fn shared_db_dsn_base(&self) -> Option<String> {
-        // the python re-derived it from the shared url; the rust seam
+        // the python re-derived it from the shared url; the rust side
         // carries a Connect, so rebuild from the same env
         let pw = std::env::var("GODON_ARCHIVE_DB_PASSWORD").unwrap_or_else(|_| "postgres".into());
         let user = std::env::var("GODON_ARCHIVE_DB_USER").unwrap_or_else(|_| "postgres".into());
@@ -2084,7 +2084,7 @@ impl<K: CoordGate> Worker<K> {
 
     fn run_trials(&mut self, trial_count: &mut u64) -> Result<(), String> {
         while self.worker_should_continue()? {
-            // rollback gate, before the next trial
+            // rollback check, before the next trial
             if self.rollback_enabled && self.check_needs_rollback() {
                 eprintln!("Rollback needed, executing rollback before next trial");
                 let rollback_success = self.execute_rollback()?;
@@ -2818,11 +2818,11 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FakeGate(Arc<Mutex<GState>>);
+    struct FakeLedger(Arc<Mutex<GState>>);
 
-    impl FakeGate {
+    impl FakeLedger {
         fn new() -> Self {
-            FakeGate(Arc::new(Mutex::new(GState {
+            FakeLedger(Arc::new(Mutex::new(GState {
                 trials: Vec::new(),
                 next_number: 0,
                 kinds: Vec::new(),
@@ -2850,7 +2850,7 @@ mod tests {
         }
     }
 
-    impl LedgerGate for FakeGate {
+    impl Ledger for FakeLedger {
         fn ensure_schema(&self) -> Result<i32, DbError> {
             Ok(0)
         }
@@ -2960,7 +2960,7 @@ mod tests {
         }
     }
 
-    impl CoordGate for FakeCoord {
+    impl Coordinator for FakeCoord {
         fn decide_trial(&self, _n: i64) -> Result<Decision, CoordError> {
             self.decisions
                 .lock()
@@ -3021,7 +3021,7 @@ mod tests {
         }
     }
 
-    impl WmillGate for FakeWmill {
+    impl Wmill for FakeWmill {
         fn run_script_by_path(&self, path: &str, _args: &Value) -> Result<Value, String> {
             self.calls.lock().unwrap().push(path.to_string());
             self.scripts
@@ -3103,13 +3103,13 @@ mod tests {
 
     fn make_worker(
         config: Value,
-        gate: Arc<FakeGate>,
+        ledger: Arc<FakeLedger>,
         coord: FakeCoord,
         wmill: FakeWmill,
         http_pages: BTreeMap<String, Value>,
     ) -> Worker<FakeCoord> {
         std::env::remove_var("PUSH_METRICS_ENABLED");
-        let seams = WorkerSeams {
+        let deps = WorkerDeps {
             own_db: Arc::new(DownConnect),
             shared_db: Arc::new(DownConnect),
             wmill: Arc::new(wmill),
@@ -3120,7 +3120,7 @@ mod tests {
             remote_db: Arc::new(|_url: &str| Err(DbError::new("no remote db in unit tests"))),
             sleeper: Arc::new(|_s: f64| {}),
         };
-        Worker::with_coordinator(config, seams, gate, coord).unwrap()
+        Worker::with_coordinator(config, deps, ledger, coord).unwrap()
     }
 
     struct NoopPush;
@@ -3140,14 +3140,14 @@ mod tests {
 
     #[test]
     fn execute_trial_success_returns_metrics() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed"})),
             Ok(json!({"status": "completed", "metrics": {"throughput": 42.5}})),
         ]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill.clone(),
             BTreeMap::new(),
@@ -3160,11 +3160,11 @@ mod tests {
 
     #[test]
     fn execute_trial_effectuation_failure_returns_inf() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![Err("SSH failed".to_string())]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill,
             BTreeMap::new(),
@@ -3175,14 +3175,14 @@ mod tests {
 
     #[test]
     fn execute_trial_no_metrics_returns_inf() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed"})),
             Ok(json!({"status": "completed"})),
         ]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill,
             BTreeMap::new(),
@@ -3193,14 +3193,14 @@ mod tests {
 
     #[test]
     fn execute_trial_uses_configured_effectuation_type() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed", "successful_changes": 1})),
             Ok(json!({"status": "completed", "metrics": {"throughput": 10.0}})),
         ]);
         let mut w = make_worker(
             base_config(json!({"effectuation": {"targets": [], "type": "http"}})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill.clone(),
             BTreeMap::new(),
@@ -3211,7 +3211,7 @@ mod tests {
 
     #[test]
     fn execute_trial_total_failure_raises() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![Ok(json!({
             "status": "failed",
             "successful_changes": 0,
@@ -3223,7 +3223,7 @@ mod tests {
         }))]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill,
             BTreeMap::new(),
@@ -3235,13 +3235,13 @@ mod tests {
 
     #[test]
     fn recon_returns_metrics_from_recon() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![Ok(json!({
             "status": "completed", "metrics": {"throughput": 42.5}
         }))]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill.clone(),
             BTreeMap::new(),
@@ -3256,11 +3256,11 @@ mod tests {
 
     #[test]
     fn recon_returns_inf_on_empty_metrics() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let wmill = FakeWmill::new(vec![Ok(json!({"status": "completed", "metrics": {}}))]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             wmill,
             BTreeMap::new(),
@@ -3275,8 +3275,8 @@ mod tests {
     fn missing_creation_ts_is_the_python_error() {
         let mut config = base_config(json!({}));
         config.as_object_mut().unwrap().remove("creation_ts");
-        let gate = Arc::new(FakeGate::new());
-        let seams = WorkerSeams {
+        let ledger = Arc::new(FakeLedger::new());
+        let deps = WorkerDeps {
             own_db: Arc::new(DownConnect),
             shared_db: Arc::new(DownConnect),
             wmill: Arc::new(FakeWmill::new(vec![])),
@@ -3289,8 +3289,8 @@ mod tests {
         };
         let err = match Worker::<FakeCoord>::with_coordinator(
             config,
-            seams,
-            gate,
+            deps,
+            ledger,
             FakeCoord::new(vec![], vec![]),
         ) {
             Err(e) => e,
@@ -3305,24 +3305,24 @@ mod tests {
     #[test]
     fn target_resolution_valid_and_invalid() {
         let targets = json!([{"id": "t0", "address": "10.0.0.1"}]);
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(
                 json!({"effectuation": {"targets": targets, "type": "ssh"}, "target_id": 0}),
             ),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
         );
         assert_eq!(w.target["id"], json!("t0"));
 
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(
                 json!({"effectuation": {"targets": targets, "type": "ssh"}, "target_id": 99}),
             ),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3335,7 +3335,7 @@ mod tests {
 
     #[test]
     fn run_executes_single_trial_then_walk_completes() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed", "successful_changes": 1})),
@@ -3343,20 +3343,20 @@ mod tests {
         ]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate.clone(),
+            ledger.clone(),
             coord,
             wmill,
             BTreeMap::new(),
         );
         w.run().unwrap();
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert_eq!(g.completes.len(), 1);
         assert_eq!(g.completes[0].1, Some(42.5));
     }
 
     #[test]
     fn run_marks_trial_failed_on_guardrail_violation() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed", "successful_changes": 1})),
@@ -3364,9 +3364,9 @@ mod tests {
         ]);
         let config =
             base_config(json!({"guardrails": [{"name": "cpu_usage", "hard_limit": 90.0}]}));
-        let mut w = make_worker(config, gate.clone(), coord, wmill, BTreeMap::new());
+        let mut w = make_worker(config, ledger.clone(), coord, wmill, BTreeMap::new());
         w.run().unwrap();
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert!(g
             .fails
             .iter()
@@ -3376,7 +3376,7 @@ mod tests {
 
     #[test]
     fn run_handles_trial_exception() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         // wmill dark: effectuation error → inf metrics → still completes.
         // Force the loud path instead: total effectuation failure raises.
@@ -3386,25 +3386,25 @@ mod tests {
         }))]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate.clone(),
+            ledger.clone(),
             coord,
             wmill,
             BTreeMap::new(),
         );
         w.run().unwrap();
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert_eq!(g.fails.len(), 1);
         assert!(g.completes.is_empty());
     }
 
     #[test]
     fn run_pushes_metrics_on_completion() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let coord = FakeCoord::new(vec![], vec![true]); // walk already complete
         let wmill = FakeWmill::new(vec![]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             coord,
             wmill.clone(),
             BTreeMap::new(),
@@ -3416,19 +3416,19 @@ mod tests {
 
     #[test]
     fn run_stops_on_shutdown_flag() {
-        let gate = Arc::new(FakeGate::new());
-        gate.set_stop(true);
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.set_stop(true);
         let coord = FakeCoord::new(vec![impulse_decision()], vec![]);
         let wmill = FakeWmill::new(vec![]);
         let mut w = make_worker(
             base_config(json!({})),
-            gate.clone(),
+            ledger.clone(),
             coord,
             wmill,
             BTreeMap::new(),
         );
         w.run().unwrap();
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert!(g.completes.is_empty() && g.fails.is_empty());
     }
 
@@ -3436,10 +3436,10 @@ mod tests {
 
     #[test]
     fn guardrails_no_config_and_empty_list_pass() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(json!({})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3450,10 +3450,10 @@ mod tests {
 
     #[test]
     fn guardrails_within_limits_pass() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(json!({"guardrails": [{"name": "cpu_usage", "hard_limit": 90.0}]})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3464,13 +3464,13 @@ mod tests {
 
     #[test]
     fn guardrails_single_and_multiple_violations() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(json!({"guardrails": [
                 {"name": "cpu_usage", "hard_limit": 90.0},
                 {"name": "memory_usage", "hard_limit": 85.0},
             ]})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3485,10 +3485,10 @@ mod tests {
 
     #[test]
     fn guardrails_inf_metric_is_violation() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(json!({"guardrails": [{"name": "cpu_usage", "hard_limit": 90.0}]})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3500,14 +3500,14 @@ mod tests {
 
     #[test]
     fn guardrails_skips_missing_limit_missing_metric_nonnumeric() {
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let w = make_worker(
             base_config(json!({"guardrails": [
                 {"name": "cpu_usage"},
                 {"name": "other", "hard_limit": 5.0},
                 {"name": "weird", "hard_limit": "high"},
             ]})),
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3527,10 +3527,10 @@ mod tests {
                 "target_state": "previous",
             }},
         }));
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         make_worker(
             config,
-            gate,
+            ledger,
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3611,10 +3611,10 @@ mod tests {
     #[test]
     fn guardrail_violation_noop_when_disabled() {
         // built WITHOUT rollback in the config: the machine is absent
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         let mut w = make_worker(
             base_config(json!({})),
-            gate.clone(),
+            ledger.clone(),
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
@@ -3650,7 +3650,7 @@ mod tests {
         on_failure: &str,
         stash: Option<Value>,
         best: Option<TrialRecord>,
-    ) -> (Worker<FakeCoord>, Arc<FakeGate>, FakeWmill) {
+    ) -> (Worker<FakeCoord>, Arc<FakeLedger>, FakeWmill) {
         let config = base_config(json!({
             "effectuation": {"targets": [{"id": "t1", "address": "10.0.0.1",
                 "rollback": {"enabled": true, "strategy": "standard"}}], "type": "ssh"},
@@ -3660,12 +3660,12 @@ mod tests {
                 "on_failure": on_failure,
             }},
         }));
-        let gate = Arc::new(FakeGate::new());
-        gate.0.lock().unwrap().best = best;
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.0.lock().unwrap().best = best;
         let wmill = FakeWmill::new(vec![Ok(json!({"status": "completed"}))]);
         let mut w = make_worker(
             config.clone(),
-            gate.clone(),
+            ledger.clone(),
             FakeCoord::new(vec![], vec![]),
             wmill.clone(),
             BTreeMap::new(),
@@ -3676,7 +3676,7 @@ mod tests {
             state.insert("last_successful_params".into(), stash);
             w.update_rollback_state(state);
         }
-        (w, gate, wmill)
+        (w, ledger, wmill)
     }
 
     #[test]
@@ -3817,22 +3817,22 @@ mod tests {
 
     #[test]
     fn observation_publish_phase_discriminator() {
-        let gate = |d: &Decision| -> Option<String> {
+        let phase_of = |d: &Decision| -> Option<String> {
             d.lease_phase
                 .clone()
                 .or_else(|| d.impulse_phase.map(|p| p.to_string()))
         };
         let mut d = impulse_decision();
         d.lease_phase = Some("probe_push".into());
-        assert_eq!(gate(&d).as_deref(), Some("probe_push"));
+        assert_eq!(phase_of(&d).as_deref(), Some("probe_push"));
         let mut d = impulse_decision();
         d.impulse_phase = Some("probe_push");
-        assert_eq!(gate(&d).as_deref(), Some("probe_push"));
+        assert_eq!(phase_of(&d).as_deref(), Some("probe_push"));
         let mut d = impulse_decision();
         d.mode = "hold";
         d.impulse_phase = Some("probe_pause");
-        assert_eq!(gate(&d).as_deref(), Some("probe_pause"));
-        assert_eq!(gate(&impulse_decision()), None); // parked publishes nothing
+        assert_eq!(phase_of(&d).as_deref(), Some("probe_pause"));
+        assert_eq!(phase_of(&impulse_decision()), None); // parked publishes nothing
     }
 
     // ─── the seek wish: worker-level wiring (test_seek_worker_wiring) ──
@@ -3851,14 +3851,14 @@ mod tests {
         })
     }
 
-    fn seek_worker(page: Value) -> (Worker<FakeCoord>, Arc<FakeGate>) {
+    fn seek_worker(page: Value) -> (Worker<FakeCoord>, Arc<FakeLedger>) {
         let config = base_config(json!({
             "objectives": [{"name": "objective_1", "direction": "maximize"}],
             "interference_detection": {"group": "g", "hold_params": {"param_0": 50.0}},
         }));
-        let gate = Arc::new(FakeGate::new());
+        let ledger = Arc::new(FakeLedger::new());
         // a completed trial with stashed params → neutral exists
-        gate.0.lock().unwrap().trials.push(TrialRecord {
+        ledger.0.lock().unwrap().trials.push(TrialRecord {
             number: 1,
             kind: "hold".into(),
             params: json!({"param_0": 50.0}),
@@ -3881,18 +3881,18 @@ mod tests {
         }))]);
         let w = make_worker(
             config,
-            gate.clone(),
+            ledger.clone(),
             FakeCoord::new(vec![], vec![]),
             wmill,
             pages,
         );
-        (w, gate)
+        (w, ledger)
     }
 
     #[test]
     fn seek_lifecycle_adopt_walk_return() {
-        let (mut w, gate) = seek_worker(seek_page(2));
-        gate.set_wish(Some(("sw-9".to_string(), "sender".to_string())));
+        let (mut w, ledger) = seek_worker(seek_page(2));
+        ledger.set_wish(Some(("sw-9".to_string(), "sender".to_string())));
         w.check_wish_assignment();
 
         assert_eq!(w.wish.as_ref().unwrap().instruction, "seek");
@@ -3947,7 +3947,7 @@ mod tests {
         assert!(passes > 0);
 
         // The return: written to the tender's own ledger, wish released
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert!(g.state.contains_key("seek_return::sw-9"));
         let payload: Value = serde_json::from_str(&g.state["seek_return::sw-9"]).unwrap();
         assert_eq!(payload["verdict"], json!("RETURNED"));
@@ -3958,20 +3958,20 @@ mod tests {
 
     #[test]
     fn refused_seek_never_binds() {
-        let (mut w, gate) = seek_worker(seek_page(60)); // candidates > budget 50
-        gate.set_wish(Some(("sw-bad".to_string(), "sender".to_string())));
+        let (mut w, ledger) = seek_worker(seek_page(60)); // candidates > budget 50
+        ledger.set_wish(Some(("sw-bad".to_string(), "sender".to_string())));
         w.check_wish_assignment();
         assert!(w.wish.is_none());
         assert!(w.seek_driver.is_none());
-        assert!(gate.0.lock().unwrap().removed_wishes.is_empty());
+        assert!(ledger.0.lock().unwrap().removed_wishes.is_empty());
     }
 
     // ─── the release rider (test_seek_release_rider) ──
 
     #[test]
     fn unassigned_mid_seek_writes_return_under_its_own_id() {
-        let (mut w, gate) = seek_worker(seek_page(1));
-        gate.set_wish(Some(("sw-live".to_string(), "sender".to_string())));
+        let (mut w, ledger) = seek_worker(seek_page(1));
+        ledger.set_wish(Some(("sw-live".to_string(), "sender".to_string())));
         w.check_wish_assignment();
         assert!(w.seek_driver.is_some());
 
@@ -3984,10 +3984,10 @@ mod tests {
         w.seek_open = None;
 
         // The controller closes the wish: the assignment row vanishes.
-        gate.set_wish(None);
+        ledger.set_wish(None);
         w.check_wish_assignment();
 
-        let g = gate.0.lock().unwrap();
+        let g = ledger.0.lock().unwrap();
         assert!(g.state.contains_key("seek_return::sw-live"));
         let payload: Value = serde_json::from_str(&g.state["seek_return::sw-live"]).unwrap();
         assert_eq!(payload["verdict"], json!("RETURNED"));
@@ -4026,22 +4026,22 @@ mod tests {
         }
     }
 
-    fn dial_worker(trials: Vec<TrialRecord>) -> (Worker<FakeCoord>, Arc<FakeGate>) {
+    fn dial_worker(trials: Vec<TrialRecord>) -> (Worker<FakeCoord>, Arc<FakeLedger>) {
         let config = base_config(json!({
             "systemtender": {"type": "bench_greenhouse", "uuid": "test-uuid", "name": "test"},
             "settings": greenhouse_settings(),
             "objectives": [{"name": "growth_rate", "direction": "maximize"}],
         }));
-        let gate = Arc::new(FakeGate::new());
-        gate.set_trials(trials);
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.set_trials(trials);
         let w = make_worker(
             config,
-            gate.clone(),
+            ledger.clone(),
             FakeCoord::new(vec![], vec![]),
             FakeWmill::new(vec![]),
             BTreeMap::new(),
         );
-        (w, gate)
+        (w, ledger)
     }
 
     #[test]

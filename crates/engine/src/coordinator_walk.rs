@@ -174,7 +174,7 @@ impl std::fmt::Display for CoordError {
 /// `collect_upper_bounds_fn` / `compute_neutral_params_fn`, plus the
 /// rust replacements for the two injection points the python tests
 /// hacked through config dicts (walk transport callable) and module
-/// paths (nothing here): one seam, explicit.
+/// paths (nothing here): one injection point, explicit.
 pub struct CoordHooks {
     /// the worker's settings-tree walker — REQUIRED, the walk's bounds
     pub collect_upper_bounds: Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>,

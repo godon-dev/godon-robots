@@ -21,12 +21,12 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::ledger::TrialLedger;
-use crate::worker_loop::{WmillGate, Worker, WorkerSeams};
+use crate::worker_loop::{Wmill, Worker, WorkerDeps};
 
 /// The component dependencies — everything [`main.rs`] builds from
 /// env, and everything the tests fake.
 pub struct ComponentDeps {
-    pub wmill: Arc<dyn WmillGate>,
+    pub wmill: Arc<dyn Wmill>,
     pub recon_http: Arc<dyn godon_recon::http::ReconHttp>,
     pub prom: Arc<dyn godon_recon::prometheus::PromConnect>,
     pub effectuation_http: Arc<dyn godon_effectuation::http::Http>,
@@ -129,11 +129,11 @@ fn run_worker(args: &Value, deps: &ComponentDeps) -> Result<Value, String> {
     let dsn = format!("postgresql://{user}:{pw}@{host}:{port}/{tender_db}");
 
     let ledger = Arc::new(TrialLedger::new(&dsn).map_err(|e| e.to_string())?);
-    let seams = WorkerSeams::production(deps.wmill.clone(), &tender_db);
+    let worker_deps = WorkerDeps::production(deps.wmill.clone(), &tender_db);
     type ProductionCoordinator =
         crate::coordinator::ProbeCoordinator<Arc<dyn crate::ledger::Connect + Send + Sync>>;
     let mut worker =
-        Worker::<ProductionCoordinator>::connect(config, seams, ledger).map_err(|e| e.to_string())?;
+        Worker::<ProductionCoordinator>::connect(config, worker_deps, ledger).map_err(|e| e.to_string())?;
     worker.run()?;
 
     // the python main's summary
@@ -222,7 +222,7 @@ mod tests {
     }
 
     struct FakeWmill;
-    impl WmillGate for FakeWmill {
+    impl Wmill for FakeWmill {
         fn run_script_by_path(&self, _p: &str, _a: &Value) -> Result<Value, String> {
             Ok(json!({}))
         }

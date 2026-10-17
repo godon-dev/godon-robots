@@ -580,7 +580,7 @@ pub use pyjson::py_dumps;
 /// `", "` and `": "`, non-ASCII escaped (`ensure_ascii`), floats in
 /// python repr form (`75.0`, never `75`). One writer serves every
 /// JSON string the body emits — stamps payloads, `state_get`
-/// returns, and the golden fixture dump — so all seams carry the
+/// returns, and the golden fixture dump — so all paths carry the
 /// same bytes. `serde_json`'s default (sorted) map underpins this,
 /// but the writer sorts explicitly, so enabling `preserve_order`
 /// elsewhere cannot silently unsort these strings.

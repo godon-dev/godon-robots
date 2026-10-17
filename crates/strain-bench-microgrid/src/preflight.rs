@@ -6,7 +6,7 @@
 //! sits OUTSIDE the try, so a null `meta` raises straight out of
 //! `main` — mirrored by `Err` carrying the raise text. Everything
 //! inside the try maps to the `"Preflight validation error: {e}"`
-//! envelope, python's except verbatim.
+//! result, python's except verbatim.
 
 use serde::Serialize;
 use serde_json::Value;

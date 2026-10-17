@@ -18,7 +18,7 @@ pub enum ReconHttpErr {
     Fatal(String),
 }
 
-/// The transport seam — the python patched `requests.get`; the rust
+/// The transport trait — the python patched `requests.get`; the rust
 /// tests fake exactly this surface.
 pub trait ReconHttp: Send + Sync {
     fn get_json(&self, url: &str, timeout_secs: f64) -> Result<Value, ReconHttpErr>;
