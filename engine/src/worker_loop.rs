@@ -209,6 +209,8 @@ impl<C: Connect> Coordinator for ProbeCoordinator<C> {
 pub trait Wmill: Send + Sync {
     fn run_script_by_path(&self, path: &str, args: &Value) -> Result<Value, String>;
     fn set_state(&self, state: &Value) -> Result<(), String>;
+    /// The platform run's own-args edge (the door's self-serve mode).
+    fn get_job_args(&self, job_id: &str) -> Result<Value, String>;
 }
 
 impl Wmill for godon_wmill::WmillClient {
@@ -217,6 +219,9 @@ impl Wmill for godon_wmill::WmillClient {
     }
     fn set_state(&self, state: &Value) -> Result<(), String> {
         godon_wmill::WmillClient::set_state(self, state)
+    }
+    fn get_job_args(&self, job_id: &str) -> Result<Value, String> {
+        godon_wmill::WmillClient::get_job_args(self, job_id)
     }
 }
 
@@ -3132,6 +3137,9 @@ mod tests {
         fn set_state(&self, state: &Value) -> Result<(), String> {
             self.states.lock().unwrap().push(state.clone());
             Ok(())
+        }
+        fn get_job_args(&self, _job_id: &str) -> Result<Value, String> {
+            Ok(json!({}))
         }
     }
 

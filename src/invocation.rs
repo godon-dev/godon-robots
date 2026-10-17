@@ -1,4 +1,4 @@
-//! The component dispatch — argv[1] names the component, the args
+//! The invocation surface — argv[1] names the component, the args
 //! JSON arrives as argv[2] (the windmill bash-script `$1` shape, the
 //! controller lane's receipted pattern), and the result prints to
 //! stdout as JSON. One whole engine binary per the rung-10 ruling;
@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::ledger::TrialLedger;
-use crate::worker_loop::{Wmill, Worker, WorkerDeps};
+use godon_engine::ledger::TrialLedger;
+use godon_engine::worker_loop::{Wmill, Worker, WorkerDeps};
 
 /// The component dependencies — everything [`main.rs`] builds from
 /// env, and everything the tests fake.
@@ -117,17 +117,17 @@ pub fn run_component(component: &str, args: &Value, deps: &ComponentDeps) -> Res
                 .or_else(|| config.get("type"))
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| "preflight requires the strain type in the config".to_string())?;
-            match crate::strains::load_strain(strain_type)? {
-                crate::strains::Strain::LinuxPerformance => {
+            match godon_engine::strains::load_strain(strain_type)? {
+                godon_engine::strains::Strain::LinuxPerformance => {
                     preflight_value(strain_linux_performance::validate_config(&config))
                 }
-                crate::strains::Strain::BenchGreenhouse => {
+                godon_engine::strains::Strain::BenchGreenhouse => {
                     preflight_value(strain_bench_greenhouse::validate_config(&config))
                 }
-                crate::strains::Strain::BenchMicrogrid => {
+                godon_engine::strains::Strain::BenchMicrogrid => {
                     preflight_value(strain_bench_microgrid::validate_config(&config))
                 }
-                crate::strains::Strain::BenchGeneric => {
+                godon_engine::strains::Strain::BenchGeneric => {
                     preflight_value(strain_bench_generic::validate_config(&config))
                 }
             }
@@ -197,7 +197,7 @@ fn run_worker(args: &Value, deps: &ComponentDeps) -> Result<Value, String> {
     let ledger = Arc::new(TrialLedger::new(&dsn).map_err(|e| e.to_string())?);
     let worker_deps = WorkerDeps::production(deps.wmill.clone(), &tender_db);
     type ProductionCoordinator =
-        crate::coordinator::ProbeCoordinator<Arc<dyn crate::ledger::Connect + Send + Sync>>;
+        godon_engine::coordinator::ProbeCoordinator<Arc<dyn godon_engine::ledger::Connect + Send + Sync>>;
     let mut worker =
         Worker::<ProductionCoordinator>::connect(config, worker_deps, ledger).map_err(|e| e.to_string())?;
     worker.run()?;
@@ -294,6 +294,9 @@ mod tests {
         }
         fn set_state(&self, _s: &Value) -> Result<(), String> {
             Ok(())
+        }
+        fn get_job_args(&self, _job_id: &str) -> Result<Value, String> {
+            Ok(json!({}))
         }
     }
 
@@ -406,4 +409,5 @@ mod tests {
         assert_eq!(bytes, result.to_string());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 }
