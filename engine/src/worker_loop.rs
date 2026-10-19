@@ -751,17 +751,24 @@ impl<K: Coordinator> Worker<K> {
         if params.is_empty() {
             return;
         }
-        // python json.dumps(params) — unsorted there, sorted here (the
-        // one writer); the column is jsonb, which normalizes on store
-        let payload = py_dumps(&Value::Object(params.clone()));
+        // Bind the OBJECT (the ledger's stamps() pattern: serde Value +
+        // $1::jsonb — the crate's jsonb adaptation encodes the binary
+        // form Yugabyte accepts). The previous shape double-encoded:
+        // py_dumps to a STRING, then the bespoke text-bytes wrapper
+        // sent it as binary jsonb — Yugabyte's jsonb_recv answered
+        // "unsupported jsonb version number 34" (the string's leading
+        // quote) on every publish, and the room's standing params
+        // never landed (receipt: 65 failures/10m in loki, first
+        // observed live 2026-10-19 via the otel wire).
+        let payload = Value::Object(params.clone());
         let sid = self.systemtender_id.clone();
         let result = self.with_shared_db("publish_standing_params", move |client| {
             let body = payload.clone();
             client
                 .execute(
                     "UPDATE interference_active_systemtenders \
-                     SET params = $1, last_seen = NOW() WHERE systemtender_id = $2",
-                    &[&Value::String(body).as_jsonb(), &sid],
+                     SET params = $1::jsonb, last_seen = NOW() WHERE systemtender_id = $2",
+                    &[&body, &sid],
                 )
                 .map_err(DbError::from)?;
             Ok(())
@@ -2823,31 +2830,9 @@ pub fn beat_once(own: &dyn Connect, interval: f64) -> Result<(), DbError> {
     Ok(())
 }
 
-// jsonb-typed param helper: psycopg2 sent text and let the server cast
-trait JsonbParam {
-    fn as_jsonb(&self) -> JsonbValue;
-}
-#[derive(Debug)]
-struct JsonbValue(Value);
-impl postgres::types::ToSql for JsonbValue {
-    fn to_sql(
-        &self,
-        _ty: &postgres::types::Type,
-        out: &mut postgres::types::private::BytesMut,
-    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        let text = self.0.to_string();
-        <&str as postgres::types::ToSql>::to_sql(&text.as_str(), &postgres::types::Type::TEXT, out)
-    }
-    fn accepts(ty: &postgres::types::Type) -> bool {
-        ty == &postgres::types::Type::JSONB
-    }
-    postgres::types::to_sql_checked!();
-}
-impl JsonbParam for Value {
-    fn as_jsonb(&self) -> JsonbValue {
-        JsonbValue(self.clone())
-    }
-}
+// (the bespoke jsonb text-bytes wrapper is gone: it sent text as
+// binary and Yugabyte refused every publish — the ledger's
+// serde-Value + $1::jsonb pattern is the one true binding)
 
 /// Joint serving: a multi-claim plan names every sender; each tender
 /// serves its own moves and ignores the rest. The legacy single-move
