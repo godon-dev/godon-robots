@@ -158,6 +158,10 @@ pub fn emit_result(result: &Value) {
             "result.json write failed ({e}) - the rail reads the file; stdout still carries the answer"
         );
     }
+    // the door's last beat: hand the otel batch over to the
+    // collector before the process exits (the timer thread dies
+    // with us; python's atexit flush is this call)
+    crate::otel_logging::shutdown_telemetry();
 }
 
 /// Write the rail's result file into `dir`. Split out so the suite

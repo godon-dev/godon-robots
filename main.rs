@@ -7,16 +7,19 @@
 use std::io::Read;
 
 mod invocation;
+mod otel_logging;
 mod router;
 
 use crate::invocation::{emit_result, run_component, ComponentDeps};
 use crate::router::run_platform_job;
 
 fn main() {
-    // Two tiers of stderr diagnostics: regular records always log;
-    // intense detail (per-probe, per-sample) needs RUST_LOG=debug.
-    // The result JSON on stdout is untouched.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Two tiers of diagnostics, two sinks: the same `log` records go
+    // to stderr (the windmill job log, tiers per RUST_LOG) and to
+    // loki via the otel collector — the engine's wire, the same
+    // bridge the controller ships. The result JSON on stdout is
+    // untouched.
+    otel_logging::init_telemetry();
 
     let mut argv = std::env::args().skip(1);
     let component = match argv.next() {

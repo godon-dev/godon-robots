@@ -19,6 +19,13 @@ serde_json = "1"
 # stdout-only
 log = "0.4"
 env_logger = "0.11"
+# the otel wire: the same bridge + versions the controller ships
+# (OTLP/HTTP logs to the observability collector; service.name from
+# OTEL_SERVICE_NAME, default godon-robots)
+opentelemetry = "0.33"
+opentelemetry_sdk = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "logs"] }
+opentelemetry-appender-log = "0.33"
 # the Serialize trait path for the preflight arm's passthrough bound
 serde = { version = "1", default-features = false }
 # the tender engine (the worker loop, the ledger, the Wmill trait)
