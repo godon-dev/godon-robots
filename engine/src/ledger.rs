@@ -109,6 +109,16 @@ pub fn is_retryable(text: &str) -> bool {
     RETRYABLE_DB_ERROR_PATTERNS.iter().any(|p| text.contains(p))
 }
 
+/// The store is definitively not there — both live wordings: pgsql's
+/// "does not exist" and YB's "not found in Raft group". The death
+/// door's gone-store read (designs/2026-10-18-worker-death-door): a
+/// tender whose state store is gone is a deleted tender — the only
+/// sane answer is stop. Transient errors never match; they keep the
+/// retry ladder, not the exit.
+pub fn definitive_absence(text: &str) -> bool {
+    text.contains("does not exist") || text.to_lowercase().contains("not found in raft group")
+}
+
 /// Four attempts, sleeping 0.5 · 1.0 · 1.5 · 2.0s — after every
 /// failed attempt, the fourth included: the python original's loop
 /// slept after its last failure too, before raising (`max_retries=4`,
@@ -487,15 +497,30 @@ impl<C: Connect> TrialLedger<C> {
 
     // ─── side reads that rode the old storage engine ─────────────
 
-    /// The tender's stop flag, same table the door writes.
+    /// The tender's stop flag, same table the door writes — and the
+    /// death door's wider observable (designs/2026-10-18): the flag
+    /// set, OR the store itself gone (a deleted tender's dropped
+    /// archive DB), both read as stop. A missing store is definitive
+    /// absence, never a transient error: deletion is the only thing
+    /// that removes it.
     pub fn stop_requested(&self) -> Result<bool, DbError> {
         self.with_conn(|tx| {
-            let row = tx
-                .query_opt(
-                    "SELECT shutdown_requested FROM systemtender_state LIMIT 1",
-                    &[],
-                )
-                .map_err(DbError::from)?;
+            let row = match tx.query_opt(
+                "SELECT shutdown_requested FROM systemtender_state LIMIT 1",
+                &[],
+            ) {
+                Ok(row) => row,
+                Err(e) => {
+                    let err = DbError::from(e);
+                    if definitive_absence(&err.message) {
+                        log::info!(
+                            "State store is gone - reading it as stop (deleted tender)"
+                        );
+                        return Ok(true);
+                    }
+                    return Err(err);
+                }
+            };
             match row {
                 Some(row) => Ok(row.try_get::<_, bool>(0)?),
                 None => Ok(false),
@@ -749,10 +774,25 @@ mod pyjson {
 mod tests {
     use super::classify;
     use super::{
-        is_retryable, retry_ladder, Connect, DbError, DsnConnect, TrialLedger, TrialRef,
-        MAX_RETRIES,
+        definitive_absence, is_retryable, retry_ladder, Connect, DbError, DsnConnect,
+        TrialLedger, TrialRef, MAX_RETRIES,
     };
     use serde_json::{json, Value};
+
+    /// The death door's gone-store wordings (designs/2026-10-18):
+    /// both live forms of "the store is not there" read as stop;
+    /// transient errors never do.
+    #[test]
+    fn definitive_absence_matches_both_wordings_only() {
+        assert!(definitive_absence(
+            "error: relation \"systemtender_state\" does not exist"
+        ));
+        assert!(definitive_absence(
+            "Table <unknown> (00004001...) not found in Raft group 000..."
+        ));
+        assert!(!definitive_absence("connection refused"));
+        assert!(!definitive_absence("db error: password authentication failed"));
+    }
 
     /// The pinned mapping — causal's from_trials, written once.
     /// Every row mirrors the python golden cases byte-for-byte.
