@@ -282,8 +282,9 @@ impl WmillHttp for ReqwestWmillHttp {
             .get(format!("{}{}", self.base, path))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json");
-        for (k, v) in query {
-            req = req.query(&(*k, v.as_str()));
+        if !query.is_empty() {
+            let pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            req = req.query(&pairs);
         }
         let resp = req.send().map_err(|e| e.to_string())?;
         Ok(WmillResp {
@@ -304,8 +305,9 @@ impl WmillHttp for ReqwestWmillHttp {
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
             .json(body);
-        for (k, v) in query {
-            req = req.query(&(*k, v.as_str()));
+        if !query.is_empty() {
+            let pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            req = req.query(&pairs);
         }
         let resp = req.send().map_err(|e| e.to_string())?;
         Ok(WmillResp {
@@ -479,5 +481,101 @@ mod tests {
         http.push(resp(500, "internal"));
         let err = client(http).get_variable("u/x").unwrap_err();
         assert!(err.starts_with("HTTP 500"));
+    }
+
+    /// The wire regression the estate caught: run_script_by_path sends
+    /// parent_job as a query pair, and the real transport must carry it
+    /// to the wire. Against the old per-item `.query(&(*k, v))` shape
+    /// reqwest fails to build the request ("builder error", source
+    /// "unsupported pair") and the POST never leaves the process — the
+    /// estate's symptom: zero recon/effectuation children while every
+    /// trial logged "Trial execution failed: builder error". This test
+    /// runs the REAL reqwest transport against a loopback listener, so
+    /// the serialization shape is exercised, not faked.
+    #[test]
+    fn dispatch_query_pairs_reach_the_wire() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_thread = seen.clone();
+        std::thread::spawn(move || {
+            let replies = [
+                ("text/plain", "job-17".to_string()),
+                (
+                    "application/json",
+                    r#"{"started": true, "completed": true, "success": true, "result": {"metrics": {"a": 1.0}}}"#.to_string(),
+                ),
+            ];
+            for (i, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = match stream.read(&mut chunk) {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break; // headers (and the tiny body) arrived
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                seen_thread
+                    .lock()
+                    .unwrap()
+                    .push(head.lines().next().unwrap_or_default().to_string());
+                let (ctype, body) = &replies[i];
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    ctype,
+                    body.len(),
+                    body
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+                if i + 1 == replies.len() {
+                    break;
+                }
+            }
+        });
+
+        std::env::set_var("BASE_INTERNAL_URL", format!("http://{addr}"));
+        std::env::set_var("WM_TOKEN", "test-token");
+        std::env::set_var("WM_WORKSPACE", "godon");
+        std::env::set_var("WM_JOB_ID", "parent-1");
+        std::env::remove_var("WM_ROOT_FLOW_JOB_ID");
+
+        let transport = Arc::new(ReqwestWmillHttp::from_env().unwrap());
+        let wired = WmillClient::from_env(transport).unwrap();
+        let out = wired
+            .run_script_by_path("f/x", &serde_json::json!({}))
+            .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+        assert_eq!(out["metrics"]["a"], 1.0);
+
+        let lines = seen.lock().unwrap();
+        assert_eq!(
+            lines.len(),
+            2,
+            "POST and result poll both reached the listener"
+        );
+        assert_eq!(
+            lines[0], "POST /api/w/godon/jobs/run/p/f/x?parent_job=parent-1 HTTP/1.1",
+            "the parent_job pair must ride the request line"
+        );
+        assert_eq!(
+            lines[1],
+            "GET /api/w/godon/jobs_u/completed/get_result_maybe/job-17?get_started=true HTTP/1.1",
+            "the poll pair must ride the request line too"
+        );
+        std::env::remove_var("BASE_INTERNAL_URL");
+        std::env::remove_var("WM_TOKEN");
+        std::env::remove_var("WM_WORKSPACE");
+        std::env::remove_var("WM_JOB_ID");
     }
 }
