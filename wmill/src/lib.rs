@@ -103,8 +103,14 @@ impl WmillClient {
         let state_path = std::env::var("WM_STATE_PATH_NEW")
             .or_else(|_| std::env::var("WM_STATE_PATH"))
             .ok();
-        let parent_job = std::env::var("WM_JOB_ID").ok();
-        let root_job = std::env::var("WM_ROOT_FLOW_JOB_ID").ok();
+        // python's os.getenv truthiness: an EMPTY string (the rail
+        // delivers WM_ROOT_FLOW_JOB_ID="" for non-flow jobs) is
+        // dropped, not sent — a set-but-empty value must never ride
+        // the query string (the API parses it as a malformed UUID).
+        let parent_job = std::env::var("WM_JOB_ID").ok().filter(|v| !v.is_empty());
+        let root_job = std::env::var("WM_ROOT_FLOW_JOB_ID")
+            .ok()
+            .filter(|v| !v.is_empty());
         Ok(WmillClient::new(
             http, workspace, state_path, parent_job, root_job,
         ))
@@ -549,7 +555,10 @@ mod tests {
         std::env::set_var("WM_TOKEN", "test-token");
         std::env::set_var("WM_WORKSPACE", "godon");
         std::env::set_var("WM_JOB_ID", "parent-1");
-        std::env::remove_var("WM_ROOT_FLOW_JOB_ID");
+        // the rail delivers this EMPTY for non-flow jobs; it must be
+        // dropped, not sent (the API parses it as a malformed UUID —
+        // estate receipt: HTTP 400 root_job invalid length 0)
+        std::env::set_var("WM_ROOT_FLOW_JOB_ID", "");
 
         let transport = Arc::new(ReqwestWmillHttp::from_env().unwrap());
         let wired = WmillClient::from_env(transport).unwrap();
