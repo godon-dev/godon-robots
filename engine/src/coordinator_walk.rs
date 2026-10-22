@@ -1077,6 +1077,12 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// this and lets itself out when the walks are done — finished
     /// walkers leave, the room goes still.
     pub fn char_complete(&self) -> Result<bool, CoordError> {
+        // A pending probe override is un-walked work — the quiet-bench
+        // lever must not fire under a wish's remeasure (miss-as-gavel:
+        // the miss re-opens the walk; found live 2026-10-22).
+        if self.probe_override.borrow().is_some() {
+            return Ok(false);
+        }
         let converged = self.converged_params.borrow().clone();
         let walk_done = {
             let mut walk = self.char_walk.borrow_mut();
@@ -1238,9 +1244,18 @@ impl<C: Connect> ProbeCoordinator<C> {
         // the walk) left walk_pending TRUE and nothing else refreshes
         // the flag — a stale TRUE then denies every active walker
         // forever (seed-47 deadlock, run 33720423947).
-        if !self.walk_pending()? {
+        // EXCEPT: a pending probe override is un-walked work — the
+        // wish's remeasure re-opens the walk (miss-as-gavel; found
+        // live 2026-10-22: the aimed hint starved behind a finished
+        // walk — the card named the level, no window ever opened).
+        if !self.walk_pending()? && self.probe_override.borrow().is_none() {
             self.publish_demand(false);
             return Ok(self.park_result("walk complete"));
+        }
+        if !self.walk_pending()? {
+            log::info!(
+                "WALK RE-OPENED: probe override pending — the wish's remeasure"
+            );
         }
 
         // Try to become sender
@@ -2210,6 +2225,29 @@ mod walk_tests {
             })]));
         assert!(coord.walk_pending().unwrap());
         assert!(!coord.char_complete().unwrap());
+    }
+
+    #[test]
+    fn probe_override_reopens_a_finished_walk() {
+        // Miss-as-gavel: a pending aimed probe is un-walked work — the
+        // quiet lever holds (found live 2026-10-22: the wish's remeasure
+        // hint starved behind a finished walk; the card named the level,
+        // no window ever opened).
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        coord.init_characterization().unwrap();
+        // exhaust the floor and retire the param — a complete walk
+        for _ in 0..5 {
+            coord.ask_next_probe().unwrap().unwrap();
+        }
+        coord.converged_params.borrow_mut().insert("param_0".into());
+        assert!(!coord.walk_pending().unwrap());
+        assert!(coord.char_complete().unwrap());
+        // the wish's aimed probe lands: the walk is open again
+        coord.set_probe_override("param_0", &[50.0], None, None);
+        assert!(!coord.char_complete().unwrap());
+        // and the aimed level is served to the next push block
+        let p = coord.override_next_probe().unwrap();
+        assert_eq!((p.param_name.as_str(), p.level), ("param_0", 50.0));
     }
 
     // ── tell + refinement (python test_char_tell / test_refinement) ──
