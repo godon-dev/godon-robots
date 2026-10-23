@@ -294,13 +294,18 @@ impl<C: Connect> TrialLedger<C> {
     /// shape; the connection closes on drop either way.
     fn with_conn<T>(
         &self,
-        op: impl FnOnce(&mut postgres::Transaction) -> Result<T, DbError>,
+        mut op: impl FnMut(&mut postgres::Transaction) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let mut op = Some(op);
+        // The op is re-called on every attempt — the python original's
+        // `fn` was callable per attempt, and each attempt rides its own
+        // fresh transaction: a failed attempt never committed, so
+        // re-running the op is clean. The port's FnOnce-take shape
+        // armed the ladder's second attempt into a panic ("one op per
+        // attempt") — the first transient failure killed the worker
+        // (live receipt 2026-10-23, job 01a16831-fb23, exit 139).
         retry_ladder(
             &mut |secs| std::thread::sleep(std::time::Duration::from_secs_f64(secs)),
             || {
-                let op = op.take().expect("one op per attempt");
                 let mut conn = self.connect.connect()?;
                 let mut tx = conn.transaction().map_err(DbError::from)?;
                 let result = op(&mut tx)?;
@@ -513,9 +518,7 @@ impl<C: Connect> TrialLedger<C> {
                 Err(e) => {
                     let err = DbError::from(e);
                     if definitive_absence(&err.message) {
-                        log::info!(
-                            "State store is gone - reading it as stop (deleted tender)"
-                        );
+                        log::info!("State store is gone - reading it as stop (deleted tender)");
                         return Ok(true);
                     }
                     return Err(err);
@@ -774,8 +777,8 @@ mod pyjson {
 mod tests {
     use super::classify;
     use super::{
-        definitive_absence, is_retryable, retry_ladder, Connect, DbError, DsnConnect,
-        TrialLedger, TrialRef, MAX_RETRIES,
+        definitive_absence, is_retryable, retry_ladder, Connect, DbError, DsnConnect, TrialLedger,
+        TrialRef, MAX_RETRIES,
     };
     use serde_json::{json, Value};
 
@@ -791,7 +794,9 @@ mod tests {
             "Table <unknown> (00004001...) not found in Raft group 000..."
         ));
         assert!(!definitive_absence("connection refused"));
-        assert!(!definitive_absence("db error: password authentication failed"));
+        assert!(!definitive_absence(
+            "db error: password authentication failed"
+        ));
     }
 
     /// The pinned mapping — causal's from_trials, written once.
@@ -879,6 +884,69 @@ mod tests {
     }
 
     // ─── the retry ladder ────────────────────────────────────────
+
+    /// A connect source that fails the first N connects with a
+    /// retryable error, then hands the real client — the connection
+    /// edge the with_conn seam exists to inject.
+    struct FlakyThenReal {
+        dsn: String,
+        fails_first: std::sync::atomic::AtomicUsize,
+        connects: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Connect for FlakyThenReal {
+        fn connect(&self) -> Result<postgres::Client, DbError> {
+            use std::sync::atomic::Ordering;
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            // Consume one planned failure only while a positive count
+            // stands — fetch_sub would wrap 0 to usize::MAX and turn
+            // every later connect flaky again (found by CI: the third
+            // with_conn inside one verb exhausted the ladder).
+            let consumed = self.fails_first.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |v| if v > 0 { Some(v - 1) } else { None },
+            );
+            if consumed.is_ok() {
+                return Err(DbError::new(
+                    "OperationalError: server closed the connection unexpectedly",
+                ));
+            }
+            postgres::Client::connect(self.dsn.as_str(), postgres::NoTls).map_err(DbError::from)
+        }
+    }
+
+    /// The live receipt's regression pin: a transient failure on
+    /// attempt 1 must retry the op on attempt 2, not panic. The port's
+    /// FnOnce-take shape armed the ladder into "one op per attempt"
+    /// (worker death, exit 139, 2026-10-23) — this test fails there
+    /// and passes once the op is re-runnable.
+    #[test]
+    fn with_conn_retries_the_op_after_a_transient_failure() {
+        let Some(dsn) = std::env::var("LEDGER_TEST_DSN")
+            .ok()
+            .filter(|s| !s.is_empty())
+        else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let connect = FlakyThenReal {
+            dsn,
+            fails_first: std::sync::atomic::AtomicUsize::new(1),
+            connects: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let ledger = TrialLedger { connect };
+        ledger.ensure_schema().unwrap();
+        ledger.state_put("retry_pin::with_conn", "re-ran").unwrap();
+        let connects = ledger
+            .connect
+            .connects
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            connects >= 2,
+            "the ladder must have retried: {connects} connects"
+        );
+    }
 
     #[test]
     fn retryable_patterns() {
