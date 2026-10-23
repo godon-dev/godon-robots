@@ -4243,7 +4243,7 @@ mod tests {
     #[test]
     fn exhausted_wallet_abandons_an_unridden_commission() {
         let (mut w, ledger) = seek_worker(seek_page(1));
-        ledger.set_wish(Some(("sw-strand".to_string(), "sender".to_string())));
+        ledger.set_wish(Some(("sw-9".to_string(), "sender".to_string())));
         w.check_wish_assignment();
         assert!(w.seek_driver.is_some());
 
@@ -4274,10 +4274,10 @@ mod tests {
         assert!(w.seek_open.is_none());
 
         let g = ledger.0.lock().unwrap();
-        let payload: Value = serde_json::from_str(&g.state["seek_return::sw-strand"]).unwrap();
+        let payload: Value = serde_json::from_str(&g.state["seek_return::sw-9"]).unwrap();
         assert_eq!(payload["verdict"], json!("RETURNED"));
         assert_eq!(payload["stop_reason"], json!("budget_exhausted"));
-        assert!(g.removed_wishes.contains(&"sw-strand".to_string()));
+        assert!(g.removed_wishes.contains(&"sw-9".to_string()));
     }
 
     // ─── the release rider (test_seek_release_rider) ──
