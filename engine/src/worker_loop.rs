@@ -1577,7 +1577,26 @@ impl<K: Coordinator> Worker<K> {
             None => return Ok(()),
             Some(d) => d.wallet_exhausted(),
         };
-        if self.seek_open.is_none() && wallet_exhausted {
+        if wallet_exhausted {
+            // The seam holds: this runs between trials, and a
+            // commission that rode its trial was already observed and
+            // closed inside run_trial_body. An open commission HERE
+            // never rode one — nothing is in flight. It bought nothing
+            // and costs nothing: abandon it, drop its probe pin (an
+            // empty level set clears on first contact, so the dead
+            // pin cannot re-open the walk post-seek), and finish with
+            // best-so-far. An exhausted wallet must never park the
+            // walk forever (live receipt 2026-10-23: wish 891381d6,
+            // spent 62 of budget 30, frozen mid-hold, tender pinned).
+            if let Some(open) = self.seek_open.take() {
+                log::info!(
+                    "Seek: wallet exhausted with an unridden commission (dial {:?}) — abandoned, finishing best-so-far",
+                    open.probe_dial
+                );
+                if let Some(dial) = &open.probe_dial {
+                    self.coordinator.set_probe_override(dial, &[]);
+                }
+            }
             if let Some(driver) = self.seek_driver.as_mut() {
                 driver.abort_with_reason(STOP_BUDGET);
             }
@@ -4214,6 +4233,51 @@ mod tests {
         assert!(w.wish.is_none());
         assert!(w.seek_driver.is_none());
         assert!(ledger.0.lock().unwrap().removed_wishes.is_empty());
+    }
+
+    /// The strand's regression pin (live receipt 2026-10-23, wish
+    /// 891381d6): a commissioned pass that never rode a trial must not
+    /// outlive the wallet. Exhaustion finishes the walk best-so-far —
+    /// the abandoned commission's probe pin is dropped with an empty
+    /// level set.
+    #[test]
+    fn exhausted_wallet_abandons_an_unridden_commission() {
+        let (mut w, ledger) = seek_worker(seek_page(1));
+        ledger.set_wish(Some(("sw-strand".to_string(), "sender".to_string())));
+        w.check_wish_assignment();
+        assert!(w.seek_driver.is_some());
+
+        // The dart rides its trial and closes.
+        w.serve_seek_step().unwrap();
+        assert!(w.seek_open.as_ref().unwrap().dart);
+        let driver = w.seek_driver.as_mut().unwrap();
+        driver.wallet_pay();
+        driver.observe(0.7, 0.02).unwrap();
+        w.seek_open = None;
+
+        // A pass is commissioned (override pinned) but never rides a
+        // trial — the room keeps the tender on ambient rounds, each
+        // paying the wallet.
+        w.serve_seek_step().unwrap();
+        let open = w.seek_open.clone().unwrap();
+        assert!(!open.dart);
+        assert!(open.probe_dial.is_some());
+        let driver = w.seek_driver.as_mut().unwrap();
+        while !driver.wallet_exhausted() {
+            driver.wallet_pay();
+        }
+
+        // The strand shape: exhaustion with the unridden commission
+        // still open must finish, not park the walk forever.
+        w.serve_seek_step().unwrap();
+        assert!(w.seek_driver.is_none(), "the seek must finish");
+        assert!(w.seek_open.is_none());
+
+        let g = ledger.0.lock().unwrap();
+        let payload: Value = serde_json::from_str(&g.state["seek_return::sw-strand"]).unwrap();
+        assert_eq!(payload["verdict"], json!("RETURNED"));
+        assert_eq!(payload["stop_reason"], json!("budget_exhausted"));
+        assert!(g.removed_wishes.contains(&"sw-strand".to_string()));
     }
 
     // ─── the release rider (test_seek_release_rider) ──
