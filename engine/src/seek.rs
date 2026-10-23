@@ -78,6 +78,10 @@ pub type Region = BTreeMap<String, RegionSpec>;
 #[derive(Debug, Clone)]
 pub struct SeekPlan {
     pub wish_id: String,
+    /// the walking tender, named by the declarer — dial names are only
+    /// unambiguous inside one tender, so the wish says whose dial-set
+    /// the region speaks (the collision cure, 2026-10-23)
+    pub tender: String,
     pub form: String,
     pub region: Region,
     /// find_best: outcome + direction (direction normalized to max/min)
@@ -90,6 +94,12 @@ pub struct SeekPlan {
 
 impl SeekPlan {
     pub fn validate(&mut self) -> Result<(), SeekRefused> {
+        if self.tender.trim().is_empty() {
+            return Err(SeekRefused::new(
+                "undeclared_tender",
+                "the walk names its tender — whose dial-set the region speaks",
+            ));
+        }
         if self.form.is_empty() {
             return Err(SeekRefused::new(
                 "undeclared_form",
@@ -182,6 +192,11 @@ pub fn parse_seek_plan(plan: &Value) -> Result<SeekPlan, SeekRefused> {
         .to_string();
     let mut parsed = SeekPlan {
         wish_id,
+        tender: plan
+            .get("tender")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         form,
         region,
         criterion,
@@ -363,6 +378,7 @@ mod tests {
     fn base_plan(over: Value) -> Value {
         let mut plan = json!({
             "wish_id": "sw-1",
+            "tender": "tender-uuid-1",
             "form": FIND_BEST,
             "region": {
                 "dial_a": [0.0, 100.0, false],
@@ -449,6 +465,7 @@ mod tests {
     fn cover_now_admits_without_search_fields() {
         let plan = parse_seek_plan(&json!({
             "wish_id": "sw-2",
+            "tender": "tender-uuid-1",
             "form": COVER_NOW,
             "region": {"dial_a": [0.0, 100.0, false]},
         }))
