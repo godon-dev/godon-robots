@@ -1524,6 +1524,7 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or(json!({}));
         let seek_plan_value = json!({
             "wish_id": wish_id,
+            "tender": body.get("tender"),
             "form": body.get("form"),
             "region": body.get("region").filter(|v| !v.is_null()).cloned().unwrap_or(json!({})),
             "criterion": body.get("criterion"),
@@ -1545,6 +1546,40 @@ impl<K: Coordinator> Worker<K> {
                 return;
             }
         };
+        // The tender is the authority on its own dials (never trust the
+        // wire): the named tender must be THIS one, and every region
+        // dial must be one it holds — the refusal lists what it does
+        // hold, so the declarer can repair (the collision cure,
+        // 2026-10-23: bare dial names repeat across tenders).
+        if seek_plan.tender != self.cfg.systemtender_uuid {
+            log::info!(
+                "Wish {wish_id} refused at the door: not_my_tender (names {}, this tender is {}) — never bound, never half-run",
+                seek_plan.tender,
+                self.cfg.systemtender_uuid
+            );
+            return;
+        }
+        let held: std::collections::BTreeSet<String> = self
+            .dials
+            .collect_upper_bounds(&self.dials.config)
+            .into_iter()
+            .map(|ub| ub.name)
+            .collect();
+        let unknown: Vec<&String> = seek_plan
+            .region
+            .keys()
+            .filter(|d| !held.contains(*d))
+            .collect();
+        if !unknown.is_empty() {
+            let mut owned: Vec<&str> = held.iter().map(|s| s.as_str()).collect();
+            owned.sort();
+            log::info!(
+                "Wish {wish_id} refused at the door: unknown_dial ({:?}; this tender holds [{}]) — never bound, never half-run",
+                unknown,
+                owned.join(", ")
+            );
+            return;
+        }
         self.wish = Some(HeldWish {
             wish_id: wish_id.to_string(),
             instruction: "seek".to_string(),
@@ -4111,6 +4146,7 @@ mod tests {
             "type": "seek",
             "instruction": "seek",
             "seek": {
+                "tender": "test-uuid-123",
                 "form": "find_best",
                 "region": {"param_0": [0.0, 100.0, false]},
                 "criterion": {"outcome": "room/objective_1", "direction": "maximize"},
@@ -4119,11 +4155,13 @@ mod tests {
             },
         })
     }
-
     fn seek_worker(page: Value) -> (Worker<FakeCoord>, Arc<FakeLedger>) {
         let config = base_config(json!({
             "objectives": [{"name": "objective_1", "direction": "maximize"}],
             "interference_detection": {"group": "g", "hold_params": {"param_0": 50.0}},
+            "settings": {"generic": {"param_0": {"constraints": [
+                {"step": 5.0, "lower": 0.0, "upper": 100.0}
+            ]}}},
         }));
         let ledger = Arc::new(FakeLedger::new());
         // a completed trial with stashed params → neutral exists
@@ -4278,6 +4316,31 @@ mod tests {
         assert_eq!(payload["verdict"], json!("RETURNED"));
         assert_eq!(payload["stop_reason"], json!("budget_exhausted"));
         assert!(g.removed_wishes.contains(&"sw-9".to_string()));
+    }
+
+    /// The collision cure's door refusals: a wish naming another tender
+    /// never binds, and a region dial this tender does not hold never
+    /// walks — the refusal lists what it does hold.
+    #[test]
+    fn seek_refuses_foreign_tender_and_unknown_dial() {
+        // foreign tender: never bound
+        let mut page = seek_page(1);
+        page["seek"]["tender"] = json!("some-other-tender-uuid");
+        let (mut w, ledger) = seek_worker(page);
+        ledger.set_wish(Some(("sw-9".to_string(), "sender".to_string())));
+        w.check_wish_assignment();
+        assert!(w.wish.is_none());
+        assert!(w.seek_driver.is_none());
+
+        // unknown dial: never bound
+        let mut page = seek_page(1);
+        page["seek"]["region"] = json!({"param_9": [0.0, 100.0, false]});
+        let (mut w, ledger) = seek_worker(page);
+        ledger.set_wish(Some(("sw-9".to_string(), "sender".to_string())));
+        w.check_wish_assignment();
+        assert!(w.wish.is_none());
+        assert!(w.seek_driver.is_none());
+        assert!(ledger.0.lock().unwrap().removed_wishes.is_empty());
     }
 
     // ─── the release rider (test_seek_release_rider) ──

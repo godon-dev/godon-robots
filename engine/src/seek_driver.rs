@@ -399,6 +399,7 @@ mod tests {
     fn find_plan(budget: i64, candidates: i64) -> SeekPlan {
         parse_seek_plan(&json!({
             "wish_id": "sw-t",
+            "tender": "tender-uuid-t",
             "form": FIND_BEST,
             "region": {"a": [0.0, 10.0, false], "b": [0.0, 10.0, false]},
             "criterion": {"outcome": "room/obj", "direction": MAXIMIZE},
@@ -487,7 +488,7 @@ mod tests {
     #[test]
     fn minimize_direction_picks_the_lowest() {
         let plan = parse_seek_plan(&json!({
-            "wish_id": "sw-t", "form": FIND_BEST,
+            "wish_id": "sw-t", "tender": "tender-uuid-t", "form": FIND_BEST,
             "region": {"a": [0.0, 10.0, false], "b": [0.0, 10.0, false]},
             "criterion": {"outcome": "r", "direction": "min"},
             "budget": 100, "candidates": 0,
@@ -556,7 +557,7 @@ mod tests {
     #[test]
     fn cover_now_walks_once_and_returns_no_finding() {
         let plan = parse_seek_plan(&json!({
-            "wish_id": "sw-c", "form": COVER_NOW,
+            "wish_id": "sw-c", "tender": "tender-uuid-c", "form": COVER_NOW,
             "region": {"a": [0.0, 4.0, false], "b": [0.0, 4.0, false]},
         }))
         .unwrap();
@@ -584,7 +585,7 @@ mod tests {
     #[test]
     fn cover_now_never_steps_a_baseline() {
         let plan = parse_seek_plan(&json!({
-            "wish_id": "sw-c", "form": COVER_NOW,
+            "wish_id": "sw-c", "tender": "tender-uuid-c", "form": COVER_NOW,
             "region": {"a": [0.0, 4.0, false], "b": [0.0, 4.0, false]},
         }))
         .unwrap();
