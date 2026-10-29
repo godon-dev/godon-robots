@@ -34,11 +34,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: fmt
+      - name: cargo fmt
         run: |
           rustup component add rustfmt
           cargo fmt --check
-      - name: clippy
+      - name: cargo clippy
         run: |
           rustup component add clippy
           cargo clippy --all-targets -- -D warnings
