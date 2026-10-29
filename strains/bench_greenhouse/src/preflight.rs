@@ -27,12 +27,8 @@ pub struct SuccessData {
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(tag = "result", rename_all = "UPPERCASE")]
 pub enum PreflightResult {
-    Success {
-        data: SuccessData,
-    },
-    Failure {
-        error: String,
-    },
+    Success { data: SuccessData },
+    Failure { error: String },
 }
 
 // --- python semantics helpers (duplicated per family crate, the
@@ -66,7 +62,10 @@ fn py_type(v: &Value) -> &'static str {
 fn py_get<'a>(v: &'a Value, key: &str) -> Result<Option<&'a Value>, String> {
     match v {
         Value::Object(m) => Ok(m.get(key)),
-        other => Err(format!("'{}' object has no attribute 'get'", py_type(other))),
+        other => Err(format!(
+            "'{}' object has no attribute 'get'",
+            py_type(other)
+        )),
     }
 }
 
@@ -136,10 +135,7 @@ fn normalize_constraints<'a>(
     None
 }
 
-fn any_constraint_with(
-    items: &[&Value],
-    has: fn(&serde_json::Map<String, Value>) -> bool,
-) -> bool {
+fn any_constraint_with(items: &[&Value], has: fn(&serde_json::Map<String, Value>) -> bool) -> bool {
     items.iter().any(|c| c.as_object().map_or(false, has))
 }
 

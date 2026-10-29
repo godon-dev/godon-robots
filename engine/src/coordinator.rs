@@ -108,7 +108,12 @@ impl ProbeCoordinator<DsnConnect> {
         hooks: CoordHooks,
         dsn: &str,
     ) -> Result<Self, DbError> {
-        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?, hooks))
+        Ok(Self::new(
+            systemtender_id,
+            config,
+            DsnConnect::new(dsn)?,
+            hooks,
+        ))
     }
 }
 
@@ -293,8 +298,12 @@ impl<C: Connect> ProbeCoordinator<C> {
              OR last_heartbeat < NOW() - INTERVAL '{stale} seconds')"
         );
         if let Err(e) = self.exec(|txn| {
-            txn.execute(&sql, &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)])
-                .map(|_| ()).map_err(DbError::from)
+            txn.execute(
+                &sql,
+                &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Failed to cleanup stale state: {e}");
             return;
@@ -305,7 +314,8 @@ impl<C: Connect> ProbeCoordinator<C> {
                  WHERE ready_at < NOW() - INTERVAL '10 minutes'",
                 &[],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Failed to cleanup stale state: {e}");
         }
@@ -318,9 +328,13 @@ impl<C: Connect> ProbeCoordinator<C> {
                 "UPDATE interference_active_systemtenders \
                  SET walk_pending = $1, last_seen = NOW() \
                  WHERE systemtender_id = $2",
-                &[&want as &(dyn postgres::types::ToSql + std::marker::Sync), &self.systemtender_id],
+                &[
+                    &want as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                ],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Failed to publish demand: {e}");
         }
@@ -432,7 +446,10 @@ impl<C: Connect> ProbeCoordinator<C> {
                 "UPDATE interference_active_systemtenders \
                  SET walk_pending = $1, last_seen = NOW() \
                  WHERE systemtender_id = $2",
-                &[&want as &(dyn postgres::types::ToSql + std::marker::Sync), &self.systemtender_id],
+                &[
+                    &want as &(dyn postgres::types::ToSql + std::marker::Sync),
+                    &self.systemtender_id,
+                ],
             )?;
             let updated = txn.execute(
                 &sql,
@@ -549,7 +566,8 @@ impl<C: Connect> ProbeCoordinator<C> {
                     &token,
                 ],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         });
         match res {
             Ok(()) => log::info!("Released sender lease (token={token})"),
@@ -560,7 +578,12 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// Set the lease phase, optionally resetting the push/pause
     /// budgets — the python built its SET list dynamically; same
     /// shape, bound parameters.
-    pub fn set_lease_phase(&self, phase: &str, push_budget: Option<i64>, pause_budget: Option<i64>) {
+    pub fn set_lease_phase(
+        &self,
+        phase: &str,
+        push_budget: Option<i64>,
+        pause_budget: Option<i64>,
+    ) {
         let mut sets = vec!["phase = $1".to_string()];
         let mut n = 1;
         if push_budget.is_some() {
@@ -599,14 +622,20 @@ impl<C: Connect> ProbeCoordinator<C> {
             params.push(&self.group_id);
             params.push(&self.systemtender_id);
             params.push(&token);
-            txn.execute(&sql, &params[..]).map(|_| ()).map_err(DbError::from)
+            txn.execute(&sql, &params[..])
+                .map(|_| ())
+                .map_err(DbError::from)
         }) {
             log::info!("Failed to set lease phase: {e}");
         }
     }
 
     pub fn decrement_budget(&self, phase: &str, is_push: bool) {
-        let col = if is_push { "push_remaining" } else { "pause_remaining" };
+        let col = if is_push {
+            "push_remaining"
+        } else {
+            "pause_remaining"
+        };
         let sql = format!(
             "UPDATE sender_lease SET phase = $1, \
              {col} = GREATEST({col} - 1, 0) \
@@ -624,7 +653,8 @@ impl<C: Connect> ProbeCoordinator<C> {
                     &token,
                 ],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Failed to decrement budget: {e}");
         }
@@ -643,7 +673,8 @@ impl<C: Connect> ProbeCoordinator<C> {
                  WHERE systemtender_id = $1",
                 &[&self.systemtender_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Presence refresh failed: {e}");
         }
@@ -850,7 +881,9 @@ pub(crate) mod db_tests {
             "receiver_observations",
             "interference_active_systemtenders",
         ] {
-            client.execute(&format!("DROP TABLE IF EXISTS {t}"), &[]).unwrap();
+            client
+                .execute(&format!("DROP TABLE IF EXISTS {t}"), &[])
+                .unwrap();
         }
         drop(client);
         let cfg = serde_json::json!({"detection": {"group": "rung10"}});
@@ -872,8 +905,10 @@ pub(crate) mod db_tests {
     fn park(dsn: &str, id: &str) {
         raw(
             dsn,
-            &format!("UPDATE interference_active_systemtenders \
-                      SET params = '{{}}'::jsonb WHERE systemtender_id = '{id}'"),
+            &format!(
+                "UPDATE interference_active_systemtenders \
+                      SET params = '{{}}'::jsonb WHERE systemtender_id = '{id}'"
+            ),
         );
     }
 

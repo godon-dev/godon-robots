@@ -132,7 +132,11 @@ mod tests {
     }
     struct NoopProm;
     impl godon_recon::prometheus::PromConnect for NoopProm {
-        fn custom_query(&self, _url: &str, _q: &str) -> Result<Value, godon_recon::prometheus::PromErr> {
+        fn custom_query(
+            &self,
+            _url: &str,
+            _q: &str,
+        ) -> Result<Value, godon_recon::prometheus::PromErr> {
             Ok(json!({}))
         }
     }

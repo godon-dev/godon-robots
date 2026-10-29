@@ -798,7 +798,8 @@ impl<K: Coordinator> Worker<K> {
     pub fn check_shutdown_requested(&self) -> bool {
         match self.ledger.stop_requested() {
             Ok(true) => {
-                log::info!("Stop flag is set for systemtender {}",
+                log::info!(
+                    "Stop flag is set for systemtender {}",
                     self.cfg.systemtender_uuid
                 );
                 true
@@ -980,7 +981,8 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or("ssh")
             .to_string();
         let effectuator_path = format!("f/effectuation/{eff_type}");
-        log::info!("Effectuating {} targets via {effectuator_path} with settings: {:?}",
+        log::info!(
+            "Effectuating {} targets via {effectuator_path} with settings: {:?}",
             targets.as_array().map(|a| a.len()).unwrap_or(0),
             settings.keys().collect::<Vec<_>>()
         );
@@ -1130,7 +1132,8 @@ impl<K: Coordinator> Worker<K> {
             "version": 0,
         });
         let _ = self.ledger.state_put(&key, &py_dumps(&initial)); // sorted vs python's insertion order — round-trips, nothing pins these bytes
-        log::info!("Initialized rollback state for target {}: {initial}",
+        log::info!(
+            "Initialized rollback state for target {}: {initial}",
             self.target_id
         );
     }
@@ -1150,7 +1153,8 @@ impl<K: Coordinator> Worker<K> {
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default(),
             None => {
-                log::info!("No rollback state found for target {}, initializing",
+                log::info!(
+                    "No rollback state found for target {}, initializing",
                     self.target_id
                 );
                 self.init_rollback_state();
@@ -1205,7 +1209,8 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.as_i64())
             .unwrap_or(3);
         if consecutive >= threshold {
-            log::info!("Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
+            log::info!(
+                "Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
             );
             return true;
         }
@@ -1256,7 +1261,8 @@ impl<K: Coordinator> Worker<K> {
             log::info!("No parameters to restore for target_state={target_state}");
             return Ok(false);
         };
-        log::info!("Rolling back to {target_state} state with params: {:?}",
+        log::info!(
+            "Rolling back to {target_state} state with params: {:?}",
             params_to_restore.keys().collect::<Vec<_>>()
         );
 
@@ -1273,7 +1279,8 @@ impl<K: Coordinator> Worker<K> {
             "targets": [self.target.clone()],
             "settings": Value::Object(params_to_restore.clone()),
         });
-        log::info!("Executing rollback effectuation for target {}",
+        log::info!(
+            "Executing rollback effectuation for target {}",
             self.target_id
         );
         match self.wmill.run_script_by_path(&effectuator_path, &args) {
@@ -1596,7 +1603,9 @@ impl<K: Coordinator> Worker<K> {
             .join(", ");
         log::info!(
             "Wish {wish_id} adopted as SEEK: form={}, dials=[{dials}], budget={}, candidates={}",
-            seek_plan.form, seek_plan.budget, seek_plan.candidates
+            seek_plan.form,
+            seek_plan.budget,
+            seek_plan.candidates
         );
         self.seek_driver = Some(SeekDriver::new(
             seek_plan.clone(),
@@ -2008,7 +2017,8 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         });
         match result {
-            Ok(()) => log::info!("Stamped finished_at for systemtender {}",
+            Ok(()) => log::info!(
+                "Stamped finished_at for systemtender {}",
                 self.systemtender_id
             ),
             Err(e) => log::info!("finished stamp failed (non-fatal): {e}"),
@@ -2202,13 +2212,16 @@ impl<K: Coordinator> Worker<K> {
         if result.is_ok() {
             self.update_state()?;
             let count = self.ledger.count().map_err(|e| e.to_string())?;
-            log::info!("SystemtenderWorker {} completed {count} trials",
+            log::info!(
+                "SystemtenderWorker {} completed {count} trials",
                 self.cfg.worker_id()
             );
             if let Ok(Some(best)) = self.ledger.best_trial(self.dials.objective_minimizes()) {
                 log::debug!(
                     "Best trial: #{}, value={:?}, params={}",
-                    best.number, best.value, best.params
+                    best.number,
+                    best.value,
+                    best.params
                 );
             }
         }

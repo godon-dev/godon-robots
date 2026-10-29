@@ -65,7 +65,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["power_draw", "storage_dispatch", "local_generation", "sim_steps"]
+            vec![
+                "power_draw",
+                "storage_dispatch",
+                "local_generation",
+                "sim_steps"
+            ]
         );
     }
 

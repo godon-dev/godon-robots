@@ -67,7 +67,10 @@ mod tests {
     /// fixture bytes themselves are pinned by the python suite.
     #[test]
     fn registry_order_and_count() {
-        let names: Vec<&str> = parameter_registry().iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = parameter_registry()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![

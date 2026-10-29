@@ -200,10 +200,11 @@ fn run_worker(args: &Value, deps: &ComponentDeps) -> Result<Value, String> {
 
     let ledger = Arc::new(TrialLedger::new(&dsn).map_err(|e| e.to_string())?);
     let worker_deps = WorkerDeps::production(deps.wmill.clone(), &tender_db);
-    type ProductionCoordinator =
-        godon_engine::coordinator::ProbeCoordinator<Arc<dyn godon_engine::ledger::Connect + Send + Sync>>;
-    let mut worker =
-        Worker::<ProductionCoordinator>::connect(config, worker_deps, ledger).map_err(|e| e.to_string())?;
+    type ProductionCoordinator = godon_engine::coordinator::ProbeCoordinator<
+        Arc<dyn godon_engine::ledger::Connect + Send + Sync>,
+    >;
+    let mut worker = Worker::<ProductionCoordinator>::connect(config, worker_deps, ledger)
+        .map_err(|e| e.to_string())?;
     worker.run()?;
 
     // the python main's summary
@@ -413,5 +414,4 @@ mod tests {
         assert_eq!(bytes, result.to_string());
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

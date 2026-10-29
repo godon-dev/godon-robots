@@ -211,8 +211,7 @@ fn validate(
                         continue;
                     };
 
-                    let ctx =
-                        format!("settings.ethtool.{param_name}.{ethtool_param}");
+                    let ctx = format!("settings.ethtool.{param_name}.{ethtool_param}");
 
                     let Some(raw_constraints) = ethtool_config.get("constraints") else {
                         errors.push(format!("{ctx}: missing 'constraints'"));

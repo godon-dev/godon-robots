@@ -347,7 +347,8 @@ pub fn main(
         }
     }
 
-    log::info!("Reconnaissance completed with {} metrics",
+    log::info!(
+        "Reconnaissance completed with {} metrics",
         metric_data.len()
     );
     json!({

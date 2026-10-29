@@ -188,9 +188,7 @@ pub struct CoordHooks {
 }
 
 impl CoordHooks {
-    pub fn new(
-        collect_upper_bounds: Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>,
-    ) -> Self {
+    pub fn new(collect_upper_bounds: Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>) -> Self {
         CoordHooks {
             collect_upper_bounds,
             compute_neutral_params: None,
@@ -384,9 +382,10 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// instrument — causal owns all curves. Falls back to None on
     /// timeout or error: the walk continues to the next probe blind.
     fn query_causal_probe_result(&self, probe: &Probe) -> Option<Value> {
-        let (Some(push_start), Some(pause_end)) =
-            (*self.round_push_start.borrow(), *self.round_pause_end.borrow())
-        else {
+        let (Some(push_start), Some(pause_end)) = (
+            *self.round_push_start.borrow(),
+            *self.round_pause_end.borrow(),
+        ) else {
             return None;
         };
         let mut payload = json!({
@@ -414,10 +413,12 @@ impl<C: Connect> ProbeCoordinator<C> {
         let timeout = self.causal_timeout();
         let url = format!("{}/characterize", self.causal_url);
         let t0 = std::time::Instant::now();
-        match self
-            .http
-            .call("POST", &url, Some(&payload), Duration::from_secs_f64(timeout))
-        {
+        match self.http.call(
+            "POST",
+            &url,
+            Some(&payload),
+            Duration::from_secs_f64(timeout),
+        ) {
             Ok(result) => {
                 let rtt = t0.elapsed().as_secs_f64();
                 {
@@ -476,7 +477,8 @@ impl<C: Connect> ProbeCoordinator<C> {
                     &lease_phase,
                 ],
             )
-            .map(|_| ()).map_err(DbError::from)
+            .map(|_| ())
+            .map_err(DbError::from)
         }) {
             log::info!("Failed to record receiver observation: {e}");
         }
@@ -490,7 +492,10 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// blind; the trial is told as FAIL to the char study).
     pub(crate) fn process_probe_result(&self, probe: &Probe) -> Option<Value> {
         let result = self.query_causal_probe_result(probe)?;
-        let converged = result.get("converged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let converged = result
+            .get("converged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let param_name = probe.param_name.as_str();
 
         // The un-converge listener: a probe that disagreed with the
@@ -498,7 +503,11 @@ impl<C: Connect> ProbeCoordinator<C> {
         // retirement is void, it re-enters the walk. Converged ground
         // is never re-probed by the coverage walk, so this flag is the
         // only thing that ever revisits it.
-        if result.get("drift").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("drift")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             if self.converged_params.borrow().contains(param_name) {
                 log::info!(
                     "UN-CONVERGE: {param_name} — probe disagreed with the curve beyond bars (drift flag); back into the walk"
@@ -525,7 +534,9 @@ impl<C: Connect> ProbeCoordinator<C> {
         let blocking = gaps
             .iter()
             .filter(|g| {
-                g.get("unresolved").and_then(|v| v.as_bool()).unwrap_or(false)
+                g.get("unresolved")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
                     && g.get("ignorance")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(f64::INFINITY)
@@ -536,13 +547,17 @@ impl<C: Connect> ProbeCoordinator<C> {
             if !self.converged_params.borrow().contains(param_name) {
                 let unresolved = gaps
                     .iter()
-                    .filter(|g| g.get("unresolved").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .filter(|g| {
+                        g.get("unresolved")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    })
                     .count();
-                log::info!(
-                    "CONVERGED: {param_name} (unresolved gaps priced out: {unresolved})"
-                );
+                log::info!("CONVERGED: {param_name} (unresolved gaps priced out: {unresolved})");
             }
-            self.converged_params.borrow_mut().insert(param_name.to_string());
+            self.converged_params
+                .borrow_mut()
+                .insert(param_name.to_string());
         } else if converged {
             log::info!(
                 "CONVERGED but {blocking} gap(s) still priced above the bar — {param_name} stays in rotation (walk bisects the gaps)"
@@ -708,15 +723,19 @@ impl<C: Connect> ProbeCoordinator<C> {
                 // causal named a dial this strain does not carry (stale
                 // plan, renamed param): drop the override, the walk
                 // resumes — never crash the loop on a stale hint.
-                log::debug!(
-                    "Probe override param unknown to this strain: {param_name} — clearing"
-                );
+                log::debug!("Probe override param unknown to this strain: {param_name} — clearing");
                 drop(ov_cell);
                 *self.probe_override.borrow_mut() = None;
                 return None;
             };
             ov.idx += 1;
-            (param_name, level, bounds, ov.ambience_anchor, ov.ambience_epoch)
+            (
+                param_name,
+                level,
+                bounds,
+                ov.ambience_anchor,
+                ov.ambience_epoch,
+            )
         };
         // stage 2 — build the probe at neutral base
         let neutral = self.get_neutral_params()?;
@@ -792,10 +811,12 @@ impl<C: Connect> ProbeCoordinator<C> {
             "{}/ambience-duty/{}?group={}",
             self.causal_url, self.systemtender_id, self.group_id
         );
-        match self
-            .http
-            .call("GET", &url, None, Duration::from_secs_f64(self.causal_timeout()))
-        {
+        match self.http.call(
+            "GET",
+            &url,
+            None,
+            Duration::from_secs_f64(self.causal_timeout()),
+        ) {
             Ok(body) => {
                 let debt = body
                     .get("debt")
@@ -870,7 +891,12 @@ impl<C: Connect> ProbeCoordinator<C> {
         let measured: HashSet<u64> = entry
             .get("levels")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|l| l.as_f64()).map(|l| round9(l).to_bits()).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_f64())
+                    .map(|l| round9(l).to_bits())
+                    .collect()
+            })
             .unwrap_or_default();
         let mut gaps: Vec<(f64, f64, f64)> = Vec::new(); // (ignorance, from, to)
         for g in entry
@@ -879,7 +905,11 @@ impl<C: Connect> ProbeCoordinator<C> {
             .map(|a| a.as_slice())
             .unwrap_or(&[])
         {
-            if !g.get("unresolved").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if !g
+                .get("unresolved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
             if g.get("ignorance")
@@ -908,7 +938,11 @@ impl<C: Connect> ProbeCoordinator<C> {
         gaps.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then((b.2 - b.1).partial_cmp(&(a.2 - a.1)).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    (b.2 - b.1)
+                        .partial_cmp(&(a.2 - a.1))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
         });
         let mut levels: Vec<f64> = Vec::new();
         for (_, from, to) in gaps {
@@ -1044,8 +1078,9 @@ impl<C: Connect> ProbeCoordinator<C> {
                     param_names
                         .iter()
                         .filter_map(|n| {
-                            st.get(n)
-                                .map(|s| format!("{n}={}/{}", s.levels_measured, display_opt(s.levels_total)))
+                            st.get(n).map(|s| {
+                                format!("{n}={}/{}", s.levels_measured, display_opt(s.levels_total))
+                            })
                         })
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -1123,7 +1158,8 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// in causal's CurveRegistry throughout.
     pub(crate) fn refine_study(&self) -> Result<(), CoordError> {
         if *self.refinement_level.borrow() >= self.refinement_depth {
-            log::info!("REFINEMENT: exhausted (depth={}) — accepting best effort",
+            log::info!(
+                "REFINEMENT: exhausted (depth={}) — accepting best effort",
                 self.refinement_depth
             );
             let mut converged = self.converged_params.borrow_mut();
@@ -1253,9 +1289,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             return Ok(self.park_result("walk complete"));
         }
         if !self.walk_pending()? {
-            log::info!(
-                "WALK RE-OPENED: probe override pending — the wish's remeasure"
-            );
+            log::info!("WALK RE-OPENED: probe override pending — the wish's remeasure");
         }
 
         // Try to become sender
@@ -1389,11 +1423,16 @@ impl<C: Connect> ProbeCoordinator<C> {
             };
             *self.current_probe.borrow_mut() = Some(probe.clone());
 
-            self.set_lease_phase(CoordState::ProbePush.as_str(), Some(self.push_block_size), None);
+            self.set_lease_phase(
+                CoordState::ProbePush.as_str(),
+                Some(self.push_block_size),
+                None,
+            );
             *self.round_push_start.borrow_mut() = Some(Utc::now());
             log::debug!(
                 "PROBE_PUSH: param={} level={}",
-                probe.param_name, probe.level
+                probe.param_name,
+                probe.level
             );
         } else {
             self.decrement_budget(CoordState::ProbePush.as_str(), true);
@@ -1435,7 +1474,11 @@ impl<C: Connect> ProbeCoordinator<C> {
             .expect("pause handler follows a push that set the probe");
 
         if *self.pause_count.borrow() == 0 {
-            self.set_lease_phase(CoordState::ProbePause.as_str(), None, Some(self.pause_block_size));
+            self.set_lease_phase(
+                CoordState::ProbePause.as_str(),
+                None,
+                Some(self.pause_block_size),
+            );
         } else {
             self.decrement_budget(CoordState::ProbePause.as_str(), false);
         }
@@ -1451,7 +1494,8 @@ impl<C: Connect> ProbeCoordinator<C> {
             *self.round_pause_end.borrow_mut() = Some(Utc::now());
             log::debug!(
                 "PROBE_PAUSE: done for param={} level={}",
-                probe.param_name, probe.level
+                probe.param_name,
+                probe.level
             );
 
             // Close the loop: causal computes shift/z/delta, tell char study.
@@ -1502,8 +1546,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         let n_converged = self.converged_params.borrow().len();
         let n_total = self.param_names.borrow().len();
-        log::info!("DONE: released lease. Converged {n_converged}/{n_total} params."
-        );
+        log::info!("DONE: released lease. Converged {n_converged}/{n_total} params.");
         Ok(self.idle_result())
     }
 
@@ -1552,9 +1595,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         *self.hold_count.borrow_mut() += 1;
         if *self.hold_count.borrow() > MAX_HOLD_TRIALS {
-            log::info!(
-                "HOLD: hit MAX_HOLD_TRIALS ({MAX_HOLD_TRIALS}) — returning to IDLE"
-            );
+            log::info!("HOLD: hit MAX_HOLD_TRIALS ({MAX_HOLD_TRIALS}) — returning to IDLE");
             *self.state.borrow_mut() = CoordState::Idle;
             return Ok(self.idle_result());
         }
@@ -1660,10 +1701,7 @@ mod walk_tests {
         let mut hold = Map::new();
         let mut settings = Map::new();
         for (name, lo, hi, _is_int) in params {
-            hold.insert(
-                name.to_string(),
-                json!(((lo + hi) / 2.0) as f64),
-            );
+            hold.insert(name.to_string(), json!(((lo + hi) / 2.0) as f64));
             settings.insert(
                 name.to_string(),
                 json!({"constraints": [{"lower": lo, "upper": hi}]}),
@@ -1913,7 +1951,9 @@ mod walk_tests {
         let stub = CausalStub::new(vec![Err(HttpError::Dark("refused".into()))], vec![]);
         let coord = make_coord(&one_param(), stub);
         seed_round(&coord);
-        assert!(coord.process_probe_result(&probe_for("param_0", 50.0)).is_none());
+        assert!(coord
+            .process_probe_result(&probe_for("param_0", 50.0))
+            .is_none());
         assert!(coord.causal_rtt_history.borrow().is_empty());
     }
 
@@ -1931,10 +1971,13 @@ mod walk_tests {
         // converged but a gap priced ABOVE its bars → stays in rotation
         let coord = make_coord(
             &one_param(),
-            CausalStub::new(vec![Ok(converged_result(json!([
-                {"unresolved": true, "ignorance": 1.0, "bars_sum": 0.1,
-                 "from_level": 50.0, "to_level": 75.0}
-            ])))], vec![]),
+            CausalStub::new(
+                vec![Ok(converged_result(json!([
+                    {"unresolved": true, "ignorance": 1.0, "bars_sum": 0.1,
+                     "from_level": 50.0, "to_level": 75.0}
+                ])))],
+                vec![],
+            ),
         );
         seed_round(&coord);
         coord.process_probe_result(&probe_for("param_0", 50.0));
@@ -1943,10 +1986,13 @@ mod walk_tests {
         // unresolved but priced OUT (ignorance <= bars_sum) → retires
         let coord = make_coord(
             &one_param(),
-            CausalStub::new(vec![Ok(converged_result(json!([
-                {"unresolved": true, "ignorance": 0.05, "bars_sum": 0.1,
-                 "from_level": 50.0, "to_level": 75.0}
-            ])))], vec![]),
+            CausalStub::new(
+                vec![Ok(converged_result(json!([
+                    {"unresolved": true, "ignorance": 0.05, "bars_sum": 0.1,
+                     "from_level": 50.0, "to_level": 75.0}
+                ])))],
+                vec![],
+            ),
         );
         seed_round(&coord);
         coord.process_probe_result(&probe_for("param_0", 50.0));
@@ -1958,10 +2004,13 @@ mod walk_tests {
         // bites when the result is not converged
         let coord = make_coord(
             &one_param(),
-            CausalStub::new(vec![
-                Ok(converged_result(json!([]))),
-                Ok(json!({"shift": 0.1, "converged": false, "drift": true, "gaps": []})),
-            ], vec![]),
+            CausalStub::new(
+                vec![
+                    Ok(converged_result(json!([]))),
+                    Ok(json!({"shift": 0.1, "converged": false, "drift": true, "gaps": []})),
+                ],
+                vec![],
+            ),
         );
         seed_round(&coord);
         coord.process_probe_result(&probe_for("param_0", 50.0));
@@ -1985,7 +2034,9 @@ mod walk_tests {
     fn ambience_debt_cache_ttl_and_answers() {
         let stub = CausalStub::new(
             vec![],
-            vec![Ok(json!({"debt": [{"param": "param_0", "reason": "window_aging"}]}))],
+            vec![Ok(
+                json!({"debt": [{"param": "param_0", "reason": "window_aging"}]}),
+            )],
         );
         let coord = make_coord(&one_param(), stub.clone());
         // seeded cache (harness) holds until it expires or force
@@ -2015,7 +2066,10 @@ mod walk_tests {
         // cache (a dark view is not an answer) — forced re-asks stay dark
         let coord = make_coord(
             &one_param(),
-            CausalStub::new(vec![], vec![Err(HttpError::Status(500)), Err(HttpError::Status(500))]),
+            CausalStub::new(
+                vec![],
+                vec![Err(HttpError::Status(500)), Err(HttpError::Status(500))],
+            ),
         );
         assert!(coord.ambience_debt(true).is_none());
         assert!(coord.ambience_debt(true).is_none());
@@ -2024,7 +2078,9 @@ mod walk_tests {
             &one_param(),
             CausalStub::new(
                 vec![],
-                vec![Ok(json!({"debt": [{"param": "param_0", "reason": "window_aging"}]}))],
+                vec![Ok(
+                    json!({"debt": [{"param": "param_0", "reason": "window_aging"}]}),
+                )],
             ),
         );
         *coord.ambience_debt_cache.borrow_mut() = None;
@@ -2033,7 +2089,9 @@ mod walk_tests {
             &one_param(),
             CausalStub::new(
                 vec![],
-                vec![Ok(json!({"debt": [{"param": "param_0", "reason": "unmeasured_operating_point"}]}))],
+                vec![Ok(
+                    json!({"debt": [{"param": "param_0", "reason": "unmeasured_operating_point"}]}),
+                )],
             ),
         );
         *coord.ambience_debt_cache.borrow_mut() = None;
@@ -2077,7 +2135,7 @@ mod walk_tests {
         // the two measured mids (25, 62.5) never re-walk; the batch
         // holds exactly the one fenced survivor
         assert!(coord.override_next_probe().is_none()); // the batch is spent
-        // batch cap: many unmeasured gaps → at most AMBIENCE_WALK_BATCH
+                                                        // batch cap: many unmeasured gaps → at most AMBIENCE_WALK_BATCH
         let coord = make_coord(
             &one_param(),
             CausalStub::new(
@@ -2219,10 +2277,12 @@ mod walk_tests {
         assert!(!coord.walk_pending().unwrap()); // ambience seeded empty
         assert!(coord.char_complete().unwrap());
         // unmeasured ambience debt holds the quiet-bench lever
-        *coord.ambience_debt_cache.borrow_mut() =
-            Some((std::time::Instant::now(), vec![json!({
+        *coord.ambience_debt_cache.borrow_mut() = Some((
+            std::time::Instant::now(),
+            vec![json!({
                 "param": "param_0", "reason": "unmeasured_operating_point"
-            })]));
+            })],
+        ));
         assert!(coord.walk_pending().unwrap());
         assert!(!coord.char_complete().unwrap());
     }
@@ -2261,13 +2321,15 @@ mod walk_tests {
             coord.ask_next_probe().unwrap().unwrap();
         }
         // a converged-but-unretired tell triggers exhaustion → refine
-        coord.tell_char_study("param_0", Some(&converged_result(json!([])))).unwrap();
+        coord
+            .tell_char_study("param_0", Some(&converged_result(json!([]))))
+            .unwrap();
         assert_eq!(*coord.refinement_level.borrow(), 1);
         let st = coord.char_walk.borrow().as_ref().unwrap().status();
         assert_eq!(st["param_0"].step, 12.5); // 25.0 halved
-        // depth cap accepts best effort: exhaust the refined floor,
-        // then the next exhaustion finds the depth spent → everything
-        // converges
+                                              // depth cap accepts best effort: exhaust the refined floor,
+                                              // then the next exhaustion finds the depth spent → everything
+                                              // converges
         for _ in 0..4 {
             coord.ask_next_probe().unwrap().unwrap();
         }
@@ -2318,7 +2380,7 @@ mod room_walk_tests {
     //! to the real tables (CI runs these against the service postgres).
     use super::*;
     use crate::coordinator::db_tests::ROOM;
-    use crate::coordinator::{ProbeCoordinator, register_interference_systemtender};
+    use crate::coordinator::{register_interference_systemtender, ProbeCoordinator};
     use crate::ledger::DsnConnect;
     use serde_json::json;
     use std::collections::VecDeque;
@@ -2375,16 +2437,14 @@ mod room_walk_tests {
         Stub {
             characterize: Arc::new(Mutex::new(chars.into_iter().map(Ok).collect())),
             ambience: Arc::new(Mutex::new(
-                vec![Ok(json!({"debt": []}))].into_iter().collect::<VecDeque<_>>(),
+                vec![Ok(json!({"debt": []}))]
+                    .into_iter()
+                    .collect::<VecDeque<_>>(),
             )),
         }
     }
 
-    fn build(
-        dsn_str: &str,
-        cfg: &Value,
-        http: Stub,
-    ) -> ProbeCoordinator<DsnConnect> {
+    fn build(dsn_str: &str, cfg: &Value, http: Stub) -> ProbeCoordinator<DsnConnect> {
         let hooks = CoordHooks {
             collect_upper_bounds: Arc::new(super::walk_tests::fake_upper_bounds),
             compute_neutral_params: None,
@@ -2407,7 +2467,9 @@ mod room_walk_tests {
             "receiver_observations",
             "interference_active_systemtenders",
         ] {
-            client.execute(&format!("DROP TABLE IF EXISTS {t}"), &[]).unwrap();
+            client
+                .execute(&format!("DROP TABLE IF EXISTS {t}"), &[])
+                .unwrap();
         }
         drop(client);
         let a = build(dsn, cfg, http);
@@ -2543,7 +2605,8 @@ mod room_walk_tests {
         };
         let _room = ROOM.lock().unwrap_or_else(|p| p.into_inner());
         let http = stub(vec![json!({"shift": 0.5, "converged": false, "gaps": []})]);
-        let cfg = ladder_cfg(json!({"quantum_cycles": 1, "push_block_size": 2, "pause_block_size": 2}));
+        let cfg =
+            ladder_cfg(json!({"quantum_cycles": 1, "push_block_size": 2, "pause_block_size": 2}));
         let a = fresh_room(&dsn, &cfg, http, true);
         let _ = a.decide_trial(1).unwrap(); // acquire + push 1
         let _ = a.decide_trial(2).unwrap(); // push 2 → PAUSE
@@ -2554,7 +2617,8 @@ mod room_walk_tests {
 
         // solo: same shape, no peer registered → never yields
         let http = stub(vec![json!({"shift": 0.5, "converged": false, "gaps": []})]);
-        let cfg = ladder_cfg(json!({"quantum_cycles": 1, "push_block_size": 2, "pause_block_size": 2}));
+        let cfg =
+            ladder_cfg(json!({"quantum_cycles": 1, "push_block_size": 2, "pause_block_size": 2}));
         let a = fresh_room(&dsn, &cfg, http, false);
         let _ = a.decide_trial(1).unwrap();
         // wait: solo means census count 1 < 2 → parks in IDLE, no acquire
@@ -2620,7 +2684,10 @@ mod room_walk_tests {
             row.get::<_, serde_json::Value>(2),
             json!({"objective_0": 0.75})
         );
-        assert_eq!(row.get::<_, Option<String>>(3).as_deref(), Some("probe_push"));
+        assert_eq!(
+            row.get::<_, Option<String>>(3).as_deref(),
+            Some("probe_push")
+        );
     }
 
     /// MAX_HOLD_TRIALS still bounds a parked receiver (the python cap)
