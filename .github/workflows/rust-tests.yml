@@ -1,4 +1,4 @@
-name: Rust Tests
+name: Rust Integrity
 
 # Vessel rung 10: the rust port's parity harness. The engine crate's
 # tests are the byte-exact mirror of the committed golden cases — CI
