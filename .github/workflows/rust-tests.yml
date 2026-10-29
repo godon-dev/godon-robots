@@ -7,13 +7,22 @@ name: Rust Tests
 # fixture test drives the actual ledger verbs and compares
 # byte-for-byte against the one committed artifact the rust engine
 # and the godon-images readers share.
+#
+# The mutants job is the test-discrimination instrument: cargo-mutants
+# breaks the engine's pure decision surface in small ways and checks
+# the suite notices. Dispatch/weekly only — measurement, not a gate.
 
 on:
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    # weekly, Monday 03:00 UTC — the kill-rate trend run
+    - cron: '0 3 * * 1'
 
 jobs:
   rust-tests:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     services:
@@ -47,3 +56,49 @@ jobs:
         run: |
           cargo --version
           cargo test --all
+
+  mutants:
+    if: github.event_name != 'pull_request'
+    name: cargo mutants (engine decision surface)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      LEDGER_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Baseline (the suite must be green before breaking it)
+        run: cargo test -p godon-engine --quiet
+
+      - name: cargo mutants
+        run: |
+          cargo mutants \
+            -p godon-engine \
+            -f 'engine/src/seek.rs' \
+            -f 'engine/src/seek_policy.rs' \
+            -f 'engine/src/walk_policy.rs' \
+            --output mutants.out
+
+      - name: Upload outcomes
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-outcomes
+          path: mutants.out/
