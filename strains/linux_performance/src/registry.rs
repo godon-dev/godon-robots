@@ -99,10 +99,7 @@ mod tests {
         assert_eq!(first.def.kind, "int");
         assert_eq!(first.def.category.as_deref(), Some("sysctl"));
         assert!(!first.def.causes_downtime);
-        assert_eq!(
-            first.def.description,
-            "TCP read buffer (min, default, max)"
-        );
+        assert_eq!(first.def.description, "TCP read buffer (min, default, max)");
         assert_eq!(first.def.typical_range, None);
 
         // first entry WITH a typical range keeps int rendering

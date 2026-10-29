@@ -176,7 +176,11 @@ impl WalkPolicy {
         let mut best_mid: Option<f64> = None;
         for curve in curves_of(view) {
             for g in gaps_of(curve) {
-                if !g.get("unresolved").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if !g
+                    .get("unresolved")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let ignorance = g
@@ -254,11 +258,7 @@ impl WalkPolicy {
         &mut self,
         skip: &HashSet<String>,
     ) -> Result<Option<(String, f64)>, WalkError> {
-        let eligible: Vec<&String> = self
-            .bounds
-            .keys()
-            .filter(|n| !skip.contains(*n))
-            .collect();
+        let eligible: Vec<&String> = self.bounds.keys().filter(|n| !skip.contains(*n)).collect();
         if eligible.is_empty() {
             return Ok(None);
         }
@@ -297,9 +297,9 @@ impl WalkPolicy {
             });
             // raw flight — the python refine has no catch, so every
             // transport failure class kills the invocation here
-            if let Err(e) = self
-                .transport
-                .call("POST", &url, Some(&payload), Duration::from_secs(2))
+            if let Err(e) =
+                self.transport
+                    .call("POST", &url, Some(&payload), Duration::from_secs(2))
             {
                 return Err(WalkError::Loud(format!("refine transport: {e:?}")));
             }

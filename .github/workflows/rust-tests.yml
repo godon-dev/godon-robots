@@ -1,12 +1,12 @@
 name: Rust Tests
 
 # Vessel rung 10: the rust port's parity harness. The engine crate's
-# tests are the byte-exact mirror of the python golden cases — CI green
-# here is the port slices' exit criterion. Slice 2 adds the real
-# postgres (the same service the python suite runs): the golden
+# tests are the byte-exact mirror of the committed golden cases — CI
+# green here is the port slices' exit criterion. Slice 2 adds the real
+# postgres (the service the python suite ran, before delpy): the golden
 # fixture test drives the actual ledger verbs and compares
-# byte-for-byte against the one committed artifact both languages and
-# the godon-images readers share.
+# byte-for-byte against the one committed artifact the rust engine
+# and the godon-images readers share.
 
 on:
   pull_request:
@@ -34,6 +34,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: cargo fmt
+        run: |
+          rustup component add rustfmt
+          cargo fmt --check
+      - name: cargo clippy
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets -- -D warnings
       - name: cargo test
         working-directory: .
         run: |

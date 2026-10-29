@@ -253,6 +253,7 @@ fn apply_to_target(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_inner(
     http: &dyn Http,
     vars: &dyn Variables,
@@ -279,7 +280,7 @@ fn apply_inner(
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
 
     if let Some(path) = auth_variable_path {
-        let auth_creds = vars.get_variable(path).map_err(|e| HttpErr::Other(e))?;
+        let auth_creds = vars.get_variable(path).map_err(HttpErr::Other)?;
         match auth_type {
             "bearer" => {
                 let token = match &auth_creds {

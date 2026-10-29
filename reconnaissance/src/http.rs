@@ -461,7 +461,8 @@ pub fn main(
         }
     }
 
-    log::info!("HTTP reconnaissance completed with {} metrics",
+    log::info!(
+        "HTTP reconnaissance completed with {} metrics",
         metric_data.len()
     );
 

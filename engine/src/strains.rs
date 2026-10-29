@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn strain_type_defaults_to_linux_performance() {
-        assert_eq!(
-            strain_type_of(&serde_json::json!({})),
-            "linux_performance"
-        );
+        assert_eq!(strain_type_of(&serde_json::json!({})), "linux_performance");
         assert_eq!(
             strain_type_of(&serde_json::json!({"type": "bench_greenhouse"})),
             "bench_greenhouse"

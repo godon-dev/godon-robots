@@ -103,7 +103,9 @@ impl CoverageWalk {
         if meas.is_empty() {
             return span;
         }
-        meas.iter().map(|m| (level - m).abs()).fold(f64::INFINITY, f64::min)
+        meas.iter()
+            .map(|m| (level - m).abs())
+            .fold(f64::INFINITY, f64::min)
     }
 
     fn next_level(&self, name: &str) -> Option<f64> {
@@ -125,16 +127,8 @@ impl CoverageWalk {
         // the tuple's last member (the level itself) makes the pick
         // order-independent.
         cands.into_iter().max_by(|a, b| {
-            let ra = (
-                self.distance(*a, meas, hi - lo),
-                -(a - center).abs(),
-                *a,
-            );
-            let rb = (
-                self.distance(*b, meas, hi - lo),
-                -(b - center).abs(),
-                *b,
-            );
+            let ra = (self.distance(*a, meas, hi - lo), -(a - center).abs(), *a);
+            let rb = (self.distance(*b, meas, hi - lo), -(b - center).abs(), *b);
             ra.partial_cmp(&rb).unwrap()
         })
     }
@@ -144,11 +138,7 @@ impl CoverageWalk {
     /// Next (param, level) to measure, or None when the walk is done.
     /// `skip` holds converged param names (retirement).
     pub fn next_probe(&mut self, skip: &HashSet<String>) -> Option<(String, f64)> {
-        let eligible: Vec<&String> = self
-            .bounds
-            .keys()
-            .filter(|n| !skip.contains(*n))
-            .collect();
+        let eligible: Vec<&String> = self.bounds.keys().filter(|n| !skip.contains(*n)).collect();
         if eligible.is_empty() {
             return None;
         }
@@ -191,7 +181,11 @@ impl CoverageWalk {
             out.insert(
                 name.clone(),
                 ParamWalkStatus {
-                    step: if *is_int { 1.0 } else { floor.copied().unwrap_or(0.0) },
+                    step: if *is_int {
+                        1.0
+                    } else {
+                        floor.copied().unwrap_or(0.0)
+                    },
                     levels_total: total,
                     levels_measured: self.measured[name].len(),
                     levels: self.measured[name].clone(),

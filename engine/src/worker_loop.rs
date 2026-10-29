@@ -326,9 +326,7 @@ impl DialSource {
             if let Some(existing) = template.get(&ub.name) {
                 let replacement = match existing {
                     Value::Array(items) => Value::Array(
-                        std::iter::repeat(number_or_null(midpoint))
-                            .take(items.len())
-                            .collect(),
+                        std::iter::repeat_n(number_or_null(midpoint), items.len()).collect(),
                     ),
                     _ => number_or_null(midpoint),
                 };
@@ -387,7 +385,7 @@ impl DialSource {
             if trial.state == "COMPLETE" {
                 if let Some(stashed) = trial.attrs.get("effectuation_params") {
                     return Ok(match stashed {
-                        Value::String(s) => serde_json::from_str::<Value>(&s)
+                        Value::String(s) => serde_json::from_str::<Value>(s)
                             .ok()
                             .and_then(|v| v.as_object().cloned()),
                         Value::Object(o) => Some(o.clone()),
@@ -446,6 +444,9 @@ fn unix_now() -> f64 {
 
 // ─── the worker ───────────────────────────────────────────────────
 
+/// a remote-ledger connector by URL — the receiver-notification rows
+pub type RemoteDbConnect = Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>;
+
 /// The worker's injected dependencies. The production sources (DsnConnect on
 /// the libpq/shared urls, ReqwestTransport, the godon-wmill client)
 /// build via [`WorkerDeps::production`]; tests inject fakes.
@@ -458,7 +459,7 @@ pub struct WorkerDeps {
     pub http: Arc<dyn HttpTransport>,
     pub push_transport: Arc<dyn PushTransport>,
     /// connect by URL — the receiver-notification rows
-    pub remote_db: Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>,
+    pub remote_db: RemoteDbConnect,
     /// every internal sleep (retry ladders, bursts) — tests fast-forward
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
 }
@@ -490,11 +491,7 @@ impl WorkerDeps {
             wmill,
             http: Arc::new(crate::walk_policy::ReqwestTransport),
             push_transport: Arc::new(crate::metrics::ReqwestPushTransport),
-            remote_db: Arc::new(|url: &str| {
-                crate::ledger::DsnConnect::new(url)
-                    .map_err(DbError::from)?
-                    .connect()
-            }),
+            remote_db: Arc::new(|url: &str| crate::ledger::DsnConnect::new(url)?.connect()),
             sleeper: Arc::new(|secs: f64| std::thread::sleep(Duration::from_secs_f64(secs))),
         }
     }
@@ -526,7 +523,7 @@ pub struct Worker<K: Coordinator> {
     pub coordinator: K,
     pub own_db: Arc<dyn Connect + Send + Sync>,
     pub shared_db: Arc<dyn Connect + Send + Sync>,
-    pub remote_db: Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>,
+    pub remote_db: RemoteDbConnect,
     pub wmill: Arc<dyn Wmill>,
     pub http: Arc<dyn HttpTransport>,
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
@@ -574,10 +571,7 @@ impl<K: Coordinator> Worker<K> {
                 log::info!("ledger init failed: {e}");
                 crate::worker::WorkerError::BadCreationTs(e.to_string())
             });
-        let loaded = match loaded {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
+        let loaded = loaded?;
         log::info!("Ledger ready: {loaded} trials loaded");
 
         // target resolution
@@ -701,12 +695,10 @@ impl<K: Coordinator> Worker<K> {
             }
         }));
         let coordinator = ProbeCoordinator::new(
-            &format!(
-                "{}",
-                WorkerConfig::from_value(&config)
-                    .map(|c| c.systemtender_uuid)
-                    .unwrap_or_else(|_| "unknown".to_string())
-            ),
+            &WorkerConfig::from_value(&config)
+                .map(|c| c.systemtender_uuid)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .to_string(),
             &config,
             deps.shared_db.clone(),
             hooks,
@@ -798,7 +790,8 @@ impl<K: Coordinator> Worker<K> {
     pub fn check_shutdown_requested(&self) -> bool {
         match self.ledger.stop_requested() {
             Ok(true) => {
-                log::info!("Stop flag is set for systemtender {}",
+                log::info!(
+                    "Stop flag is set for systemtender {}",
                     self.cfg.systemtender_uuid
                 );
                 true
@@ -980,7 +973,8 @@ impl<K: Coordinator> Worker<K> {
             .unwrap_or("ssh")
             .to_string();
         let effectuator_path = format!("f/effectuation/{eff_type}");
-        log::info!("Effectuating {} targets via {effectuator_path} with settings: {:?}",
+        log::info!(
+            "Effectuating {} targets via {effectuator_path} with settings: {:?}",
             targets.as_array().map(|a| a.len()).unwrap_or(0),
             settings.keys().collect::<Vec<_>>()
         );
@@ -1130,7 +1124,8 @@ impl<K: Coordinator> Worker<K> {
             "version": 0,
         });
         let _ = self.ledger.state_put(&key, &py_dumps(&initial)); // sorted vs python's insertion order — round-trips, nothing pins these bytes
-        log::info!("Initialized rollback state for target {}: {initial}",
+        log::info!(
+            "Initialized rollback state for target {}: {initial}",
             self.target_id
         );
     }
@@ -1150,7 +1145,8 @@ impl<K: Coordinator> Worker<K> {
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default(),
             None => {
-                log::info!("No rollback state found for target {}, initializing",
+                log::info!(
+                    "No rollback state found for target {}, initializing",
                     self.target_id
                 );
                 self.init_rollback_state();
@@ -1205,7 +1201,8 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.as_i64())
             .unwrap_or(3);
         if consecutive >= threshold {
-            log::info!("Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
+            log::info!(
+                "Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
             );
             return true;
         }
@@ -1256,7 +1253,8 @@ impl<K: Coordinator> Worker<K> {
             log::info!("No parameters to restore for target_state={target_state}");
             return Ok(false);
         };
-        log::info!("Rolling back to {target_state} state with params: {:?}",
+        log::info!(
+            "Rolling back to {target_state} state with params: {:?}",
             params_to_restore.keys().collect::<Vec<_>>()
         );
 
@@ -1273,7 +1271,8 @@ impl<K: Coordinator> Worker<K> {
             "targets": [self.target.clone()],
             "settings": Value::Object(params_to_restore.clone()),
         });
-        log::info!("Executing rollback effectuation for target {}",
+        log::info!(
+            "Executing rollback effectuation for target {}",
             self.target_id
         );
         match self.wmill.run_script_by_path(&effectuator_path, &args) {
@@ -1596,7 +1595,9 @@ impl<K: Coordinator> Worker<K> {
             .join(", ");
         log::info!(
             "Wish {wish_id} adopted as SEEK: form={}, dials=[{dials}], budget={}, candidates={}",
-            seek_plan.form, seek_plan.budget, seek_plan.candidates
+            seek_plan.form,
+            seek_plan.budget,
+            seek_plan.candidates
         );
         self.seek_driver = Some(SeekDriver::new(
             seek_plan.clone(),
@@ -1746,7 +1747,7 @@ impl<K: Coordinator> Worker<K> {
         match result {
             Ok(()) => log::info!(
                 "Wish {wish_id}: receiver notified ({})",
-                &receiver.chars().take(8).collect::<String>()
+                receiver.chars().take(8).collect::<String>()
             ),
             Err(e) => log::info!("Wish {wish_id}: receiver notification failed: {e}"),
         }
@@ -1949,9 +1950,7 @@ impl<K: Coordinator> Worker<K> {
             "wish": self.wish_summary(),
             "seek_spend": self.seek_spend(),
         });
-        if let Err(e) = self.wmill.set_state(&state) {
-            return Err(e);
-        }
+        self.wmill.set_state(&state)?;
         self.stamp_instruments(&state);
         Ok(())
     }
@@ -2008,7 +2007,8 @@ impl<K: Coordinator> Worker<K> {
             Ok(())
         });
         match result {
-            Ok(()) => log::info!("Stamped finished_at for systemtender {}",
+            Ok(()) => log::info!(
+                "Stamped finished_at for systemtender {}",
                 self.systemtender_id
             ),
             Err(e) => log::info!("finished stamp failed (non-fatal): {e}"),
@@ -2182,9 +2182,7 @@ impl<K: Coordinator> Worker<K> {
             log::info!("Systemtender {} failed: {run_err}", self.systemtender_id);
             // python's except-block state update: if THIS fails, its
             // error replaces the loop's
-            if let Err(state_err) = self.update_state() {
-                return Err(state_err);
-            }
+            self.update_state()?;
         }
 
         // finally: the seek comes home, the wish releases, the stamps
@@ -2202,13 +2200,16 @@ impl<K: Coordinator> Worker<K> {
         if result.is_ok() {
             self.update_state()?;
             let count = self.ledger.count().map_err(|e| e.to_string())?;
-            log::info!("SystemtenderWorker {} completed {count} trials",
+            log::info!(
+                "SystemtenderWorker {} completed {count} trials",
                 self.cfg.worker_id()
             );
             if let Ok(Some(best)) = self.ledger.best_trial(self.dials.objective_minimizes()) {
                 log::debug!(
                     "Best trial: #{}, value={:?}, params={}",
-                    best.number, best.value, best.params
+                    best.number,
+                    best.value,
+                    best.params
                 );
             }
         }
@@ -2280,7 +2281,7 @@ impl<K: Coordinator> Worker<K> {
                 }
                 Ok(()) => {
                     *trial_count += 1;
-                    if *trial_count % 5 == 0 {
+                    if (*trial_count).is_multiple_of(5) {
                         self.heartbeat_interference();
                         self.update_state()?;
                         let count = self.ledger.count().map_err(|er| er.to_string())?;

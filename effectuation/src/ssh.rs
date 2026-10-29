@@ -52,7 +52,8 @@ pub fn main(
         .unwrap_or(0.0);
 
     let targets = targets.as_array().cloned().unwrap_or_default();
-    log::info!("SSH effectuation for {} targets via playbook {playbook_path}",
+    log::info!(
+        "SSH effectuation for {} targets via playbook {playbook_path}",
         targets.len()
     );
     log::info!("Settings: {}", settings_keys(settings));

@@ -327,7 +327,7 @@ impl<C: Connect> TrialLedger<C> {
             let rows = tx
                 .query("SELECT version FROM schema_version", &[])
                 .map_err(DbError::from)?;
-            let current = match rows.iter().next() {
+            let current = match rows.first() {
                 Some(row) => row.try_get::<_, i32>(0)?,
                 None => {
                     tx.execute("INSERT INTO schema_version (version) VALUES (0)", &[])
@@ -902,11 +902,15 @@ mod tests {
             // stands — fetch_sub would wrap 0 to usize::MAX and turn
             // every later connect flaky again (found by CI: the third
             // with_conn inside one verb exhausted the ladder).
-            let consumed = self.fails_first.fetch_update(
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                |v| if v > 0 { Some(v - 1) } else { None },
-            );
+            let consumed = self
+                .fails_first
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    if v > 0 {
+                        Some(v - 1)
+                    } else {
+                        None
+                    }
+                });
             if consumed.is_ok() {
                 return Err(DbError::new(
                     "OperationalError: server closed the connection unexpectedly",

@@ -114,7 +114,7 @@ fn normalize_constraints<'a>(
 }
 
 fn any_constraint_with(items: &[&Value], has: fn(&serde_json::Map<String, Value>) -> bool) -> bool {
-    items.iter().any(|c| c.as_object().map_or(false, has))
+    items.iter().any(|c| c.as_object().is_some_and(has))
 }
 
 fn has_values(c: &serde_json::Map<String, Value>) -> bool {
@@ -211,8 +211,7 @@ fn validate(
                         continue;
                     };
 
-                    let ctx =
-                        format!("settings.ethtool.{param_name}.{ethtool_param}");
+                    let ctx = format!("settings.ethtool.{param_name}.{ethtool_param}");
 
                     let Some(raw_constraints) = ethtool_config.get("constraints") else {
                         errors.push(format!("{ctx}: missing 'constraints'"));
@@ -235,12 +234,12 @@ fn validate(
                                 "{ctx}: parameter is categorical but constraints don't have 'values'"
                             ));
                         }
-                    } else if registry_type == "int" || registry_type == "float" {
-                        if !any_constraint_with(&items, has_range) {
-                            errors.push(format!(
+                    } else if (registry_type == "int" || registry_type == "float")
+                        && !any_constraint_with(&items, has_range)
+                    {
+                        errors.push(format!(
                                 "{ctx}: parameter is {registry_type} but constraints don't have step/lower/upper"
                             ));
-                        }
                     }
                 }
                 continue;
@@ -296,12 +295,12 @@ fn validate(
                         "{ctx}: parameter is categorical but constraints don't have 'values'"
                     ));
                 }
-            } else if registry_type == "int" || registry_type == "float" {
-                if !any_constraint_with(&items, has_range) {
-                    errors.push(format!(
+            } else if (registry_type == "int" || registry_type == "float")
+                && !any_constraint_with(&items, has_range)
+            {
+                errors.push(format!(
                         "{ctx}: parameter is {registry_type} but constraints don't have step/lower/upper"
                     ));
-                }
             }
         }
     }
