@@ -327,7 +327,7 @@ impl<C: Connect> TrialLedger<C> {
             let rows = tx
                 .query("SELECT version FROM schema_version", &[])
                 .map_err(DbError::from)?;
-            let current = match rows.iter().next() {
+            let current = match rows.first() {
                 Some(row) => row.try_get::<_, i32>(0)?,
                 None => {
                     tx.execute("INSERT INTO schema_version (version) VALUES (0)", &[])

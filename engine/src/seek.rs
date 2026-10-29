@@ -130,9 +130,9 @@ impl SeekPlan {
                 .get("direction")
                 .map(|v| v.as_str().unwrap_or_default())
                 .unwrap_or("");
-            let normalized = normalize_direction(&format!("{}", declared))
+            let normalized = normalize_direction(declared)
                 .map(|s| s.to_string())
-                .ok_or_else(|| SeekRefused::new("unknown_direction", &format!("{}", declared)))?;
+                .ok_or_else(|| SeekRefused::new("unknown_direction", declared))?;
             self.criterion
                 .as_mut()
                 .expect("checked above")

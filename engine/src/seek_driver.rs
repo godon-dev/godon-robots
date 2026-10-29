@@ -211,10 +211,8 @@ impl SeekDriver {
         }
 
         while self.phase == PASSES {
-            if self.dial_idx >= self.dials.len() {
-                if self.end_of_round() {
-                    return Ok(None);
-                }
+            if self.dial_idx >= self.dials.len() && self.end_of_round() {
+                return Ok(None);
             }
             let dial = self.dials[self.dial_idx].clone();
             if self.plan.form == FIND_BEST && self.wallet.exhausted() {

@@ -237,7 +237,6 @@ mod tests {
     use super::*;
     use godon_effectuation::http::HttpErr;
     use godon_recon::http::ReconHttpErr;
-    use std::sync::Mutex;
 
     struct FakeRecon {
         body: Value,

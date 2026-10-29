@@ -175,11 +175,16 @@ impl std::fmt::Display for CoordError {
 /// rust replacements for the two injection points the python tests
 /// hacked through config dicts (walk transport callable) and module
 /// paths (nothing here): one injection point, explicit.
+/// walks the settings tree, yields the walk's upper bounds
+pub type UpperBoundsCollector = Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>;
+/// the strain-format neutral-params callback
+pub type NeutralParamsSource = Arc<dyn Fn() -> Option<Map<String, Value>> + Send + Sync>;
+
 pub struct CoordHooks {
     /// the worker's settings-tree walker — REQUIRED, the walk's bounds
-    pub collect_upper_bounds: Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>,
+    pub collect_upper_bounds: UpperBoundsCollector,
     /// the strain-format neutral-params callback (optional)
-    pub compute_neutral_params: Option<Arc<dyn Fn() -> Option<Map<String, Value>> + Send + Sync>>,
+    pub compute_neutral_params: Option<NeutralParamsSource>,
     /// replaces the python tests' config-injected `walk_transport`
     pub walk_transport: Option<Arc<dyn HttpTransport>>,
     /// the coordinator's causal client (characterize + ambience-duty);
@@ -188,7 +193,7 @@ pub struct CoordHooks {
 }
 
 impl CoordHooks {
-    pub fn new(collect_upper_bounds: Arc<dyn Fn(&Value) -> Vec<UpperBound> + Send + Sync>) -> Self {
+    pub fn new(collect_upper_bounds: UpperBoundsCollector) -> Self {
         CoordHooks {
             collect_upper_bounds,
             compute_neutral_params: None,
@@ -708,9 +713,7 @@ impl<C: Connect> ProbeCoordinator<C> {
         // guard, idx advance), python statement order
         let (param_name, level, bounds, anchor, epoch) = {
             let mut ov_cell = self.probe_override.borrow_mut();
-            let Some(ov) = ov_cell.as_mut() else {
-                return None;
-            };
+            let ov = ov_cell.as_mut()?;
             if ov.idx >= ov.levels.len() {
                 drop(ov_cell);
                 *self.probe_override.borrow_mut() = None;

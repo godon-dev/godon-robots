@@ -326,9 +326,7 @@ impl DialSource {
             if let Some(existing) = template.get(&ub.name) {
                 let replacement = match existing {
                     Value::Array(items) => Value::Array(
-                        std::iter::repeat(number_or_null(midpoint))
-                            .take(items.len())
-                            .collect(),
+                        std::iter::repeat_n(number_or_null(midpoint), items.len()).collect(),
                     ),
                     _ => number_or_null(midpoint),
                 };
@@ -387,7 +385,7 @@ impl DialSource {
             if trial.state == "COMPLETE" {
                 if let Some(stashed) = trial.attrs.get("effectuation_params") {
                     return Ok(match stashed {
-                        Value::String(s) => serde_json::from_str::<Value>(&s)
+                        Value::String(s) => serde_json::from_str::<Value>(s)
                             .ok()
                             .and_then(|v| v.as_object().cloned()),
                         Value::Object(o) => Some(o.clone()),
@@ -446,6 +444,9 @@ fn unix_now() -> f64 {
 
 // ─── the worker ───────────────────────────────────────────────────
 
+/// a remote-ledger connector by URL — the receiver-notification rows
+pub type RemoteDbConnect = Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>;
+
 /// The worker's injected dependencies. The production sources (DsnConnect on
 /// the libpq/shared urls, ReqwestTransport, the godon-wmill client)
 /// build via [`WorkerDeps::production`]; tests inject fakes.
@@ -458,7 +459,7 @@ pub struct WorkerDeps {
     pub http: Arc<dyn HttpTransport>,
     pub push_transport: Arc<dyn PushTransport>,
     /// connect by URL — the receiver-notification rows
-    pub remote_db: Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>,
+    pub remote_db: RemoteDbConnect,
     /// every internal sleep (retry ladders, bursts) — tests fast-forward
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
 }
@@ -490,11 +491,7 @@ impl WorkerDeps {
             wmill,
             http: Arc::new(crate::walk_policy::ReqwestTransport),
             push_transport: Arc::new(crate::metrics::ReqwestPushTransport),
-            remote_db: Arc::new(|url: &str| {
-                crate::ledger::DsnConnect::new(url)
-                    .map_err(DbError::from)?
-                    .connect()
-            }),
+            remote_db: Arc::new(|url: &str| crate::ledger::DsnConnect::new(url)?.connect()),
             sleeper: Arc::new(|secs: f64| std::thread::sleep(Duration::from_secs_f64(secs))),
         }
     }
@@ -526,7 +523,7 @@ pub struct Worker<K: Coordinator> {
     pub coordinator: K,
     pub own_db: Arc<dyn Connect + Send + Sync>,
     pub shared_db: Arc<dyn Connect + Send + Sync>,
-    pub remote_db: Arc<dyn Fn(&str) -> Result<postgres::Client, DbError> + Send + Sync>,
+    pub remote_db: RemoteDbConnect,
     pub wmill: Arc<dyn Wmill>,
     pub http: Arc<dyn HttpTransport>,
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
@@ -574,10 +571,7 @@ impl<K: Coordinator> Worker<K> {
                 log::info!("ledger init failed: {e}");
                 crate::worker::WorkerError::BadCreationTs(e.to_string())
             });
-        let loaded = match loaded {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
+        let loaded = loaded?;
         log::info!("Ledger ready: {loaded} trials loaded");
 
         // target resolution
@@ -701,12 +695,10 @@ impl<K: Coordinator> Worker<K> {
             }
         }));
         let coordinator = ProbeCoordinator::new(
-            &format!(
-                "{}",
-                WorkerConfig::from_value(&config)
-                    .map(|c| c.systemtender_uuid)
-                    .unwrap_or_else(|_| "unknown".to_string())
-            ),
+            &WorkerConfig::from_value(&config)
+                .map(|c| c.systemtender_uuid)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .to_string(),
             &config,
             deps.shared_db.clone(),
             hooks,
@@ -1755,7 +1747,7 @@ impl<K: Coordinator> Worker<K> {
         match result {
             Ok(()) => log::info!(
                 "Wish {wish_id}: receiver notified ({})",
-                &receiver.chars().take(8).collect::<String>()
+                receiver.chars().take(8).collect::<String>()
             ),
             Err(e) => log::info!("Wish {wish_id}: receiver notification failed: {e}"),
         }
@@ -1958,9 +1950,7 @@ impl<K: Coordinator> Worker<K> {
             "wish": self.wish_summary(),
             "seek_spend": self.seek_spend(),
         });
-        if let Err(e) = self.wmill.set_state(&state) {
-            return Err(e);
-        }
+        self.wmill.set_state(&state)?;
         self.stamp_instruments(&state);
         Ok(())
     }
@@ -2192,9 +2182,7 @@ impl<K: Coordinator> Worker<K> {
             log::info!("Systemtender {} failed: {run_err}", self.systemtender_id);
             // python's except-block state update: if THIS fails, its
             // error replaces the loop's
-            if let Err(state_err) = self.update_state() {
-                return Err(state_err);
-            }
+            self.update_state()?;
         }
 
         // finally: the seek comes home, the wish releases, the stamps
@@ -2293,7 +2281,7 @@ impl<K: Coordinator> Worker<K> {
                 }
                 Ok(()) => {
                     *trial_count += 1;
-                    if *trial_count % 5 == 0 {
+                    if (*trial_count).is_multiple_of(5) {
                         self.heartbeat_interference();
                         self.update_state()?;
                         let count = self.ledger.count().map_err(|er| er.to_string())?;

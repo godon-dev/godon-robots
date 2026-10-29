@@ -136,7 +136,7 @@ fn normalize_constraints<'a>(
 }
 
 fn any_constraint_with(items: &[&Value], has: fn(&serde_json::Map<String, Value>) -> bool) -> bool {
-    items.iter().any(|c| c.as_object().map_or(false, has))
+    items.iter().any(|c| c.as_object().is_some_and(has))
 }
 
 /// Port of `preflight.main(config=None, strict_mode=True)`.
@@ -197,7 +197,7 @@ fn validate(
     let gh = gh_settings.as_object().expect("checked above");
     let two = Value::from(2);
     let zones = gh.get("zones").unwrap_or(&two);
-    if !py_is_int(zones) || py_int(zones).map_or(true, |z| z < 1) {
+    if !py_is_int(zones) || py_int(zones).is_none_or(|z| z < 1) {
         errors.push(format!(
             "settings.greenhouse.zones must be a positive integer, got: {}",
             py_repr(zones)
@@ -252,14 +252,14 @@ fn validate(
                         "{ctx}: categorical param needs 'values' in constraints"
                     ));
                 }
-            } else if registry_type == "int" || registry_type == "float" {
-                if !any_constraint_with(&items, |c| {
+            } else if (registry_type == "int" || registry_type == "float")
+                && !any_constraint_with(&items, |c| {
                     c.contains_key("step") && c.contains_key("lower") && c.contains_key("upper")
-                }) {
-                    errors.push(format!(
-                        "{ctx}: {registry_type} param needs step/lower/upper in constraints"
-                    ));
-                }
+                })
+            {
+                errors.push(format!(
+                    "{ctx}: {registry_type} param needs step/lower/upper in constraints"
+                ));
             }
         }
     }

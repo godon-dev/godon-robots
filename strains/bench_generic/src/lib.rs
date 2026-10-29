@@ -30,10 +30,9 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
         ));
     };
 
-    let has_constraints = m.values().any(|v| {
-        v.as_object()
-            .map_or(false, |d| d.contains_key("constraints"))
-    });
+    let has_constraints = m
+        .values()
+        .any(|v| v.as_object().is_some_and(|d| d.contains_key("constraints")));
     if !has_constraints {
         return Err("No parameter constraints found in generic settings".to_string());
     }
