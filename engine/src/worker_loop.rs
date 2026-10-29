@@ -449,6 +449,26 @@ fn unix_now() -> f64 {
 /// The worker's injected dependencies. The production sources (DsnConnect on
 /// the libpq/shared urls, ReqwestTransport, the godon-wmill client)
 /// build via [`WorkerDeps::production`]; tests inject fakes.
+/// The timing.end dial: "90m", "2h", "45s" - or a bare integer of
+/// seconds. None when absent or unparseable (an unparseable end does
+/// not bind; the door's validation is the louder place to catch it).
+fn timing_end_secs(cc: &Value) -> Option<u64> {
+    let end = cc.get("timing")?.get("end")?;
+    if let Some(n) = end.as_u64() {
+        return Some(n);
+    }
+    let s = end.as_str()?.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: u64 = num.parse().ok()?;
+    match unit.trim() {
+        "s" | "" => Some(n),
+        "m" => n.checked_mul(60),
+        "h" => n.checked_mul(3600),
+        _ => None,
+    }
+}
+
 pub struct WorkerDeps {
     /// the tender's own db (beats, instruments, finished stamps)
     pub own_db: Arc<dyn Connect + Send + Sync>,
@@ -538,6 +558,7 @@ pub struct Worker<K: Coordinator> {
     pub rollback_enabled: bool,
     pub heartbeat_interval_secs: f64,
     last_room_heartbeat: Option<Instant>,
+    run_started: Option<Instant>,
 
     // wish state (steer mode)
     pub wish: Option<HeldWish>,
@@ -647,6 +668,7 @@ impl<K: Coordinator> Worker<K> {
             rollback_enabled,
             heartbeat_interval_secs,
             last_room_heartbeat: None,
+            run_started: None,
             wish: None,
             seek_driver: None,
             seek_open: None,
@@ -2130,12 +2152,43 @@ impl<K: Coordinator> Worker<K> {
             log::info!("Stopping: Shutdown requested by controller");
             return Ok(false);
         }
+        // completion caps: a declared ceiling binds. Found live
+        // 2026-10-24 (godon#416): walkers ran ~50% past
+        // iterations.max because no code read the criterion at all -
+        // the rust port never carried completion over. The stop order
+        // stands: stop flag > completion caps > held-wish pin > the
+        // quiet lever.
+        let banked = self.ledger.count().map_err(|e| e.to_string())?;        if let Some(reason) = self.completion_stop_reason(banked) {
+            log::info!("{reason}");
+            return Ok(false);
+        }
         let wish_held = self.wish.is_some();
         // char_complete: errors propagate (python's raise)
-        let walk_complete = match self.coordinator.char_complete() {
+        let mut walk_complete = match self.coordinator.char_complete() {
             Ok(v) => v,
             Err(e) => return Err(e.to_string()),
         };
+        // the completion floor: no ending before iterations.min is
+        // banked (python-era semantics - completion is judged, not
+        // stumbled into). The floor only holds the walk open; the stop
+        // flag and the caps above have already returned by now. Every
+        // held-open cycle banks a trial or errors, so the floor
+        // terminates by construction.
+        if walk_complete {
+            if let Some(min) = self
+                .completion_criteria()
+                .get("iterations")
+                .and_then(|i| i.get("min"))
+                .and_then(|m| m.as_i64())
+            {
+                if banked < min {
+                    log::info!(
+                        "Completion floor: iterations.min={min} not yet banked ({banked}) - walking on"
+                    );
+                    walk_complete = false;
+                }
+            }
+        }
         let pin_current = self
             .pin_receipt
             .as_deref()
@@ -2163,6 +2216,37 @@ impl<K: Coordinator> Worker<K> {
         }
     }
 
+    // ─── completion criteria: a declared knob binds ────────────────
+
+    fn completion_criteria(&self) -> Value {
+        self.config
+            .get("run")
+            .and_then(|r| r.get("completion_criteria"))
+            .cloned()
+            .unwrap_or(json!({}))
+    }
+
+    fn completion_stop_reason(&self, trials: i64) -> Option<String> {
+        let cc = self.completion_criteria();
+        if let Some(max) = cc
+            .get("iterations")
+            .and_then(|i| i.get("max"))
+            .and_then(|m| m.as_i64())
+        {
+            if trials >= max {
+                return Some(format!(
+                    "Completion: iterations.max={max} reached ({trials} banked)"
+                ));
+            }
+        }
+        if let (Some(start), Some(secs)) = (self.run_started, timing_end_secs(&cc)) {
+            if start.elapsed().as_secs() >= secs {
+                return Some(format!("Completion: timing.end reached ({}s)", secs));
+            }
+        }
+        None
+    }
+
     // ─── the trial loop ───────────────────────────────────────────
 
     /// The run: trials until the continue policy ends them. A stop or
@@ -2172,6 +2256,7 @@ impl<K: Coordinator> Worker<K> {
     /// lands. Every exit is a clean exit (guard, rung 7).
     pub fn run(&mut self) -> Result<(), String> {
         log::info!("Starting SystemtenderWorker: {}", self.cfg.worker_id());
+        self.run_started = Some(std::time::Instant::now());
         self.metrics.purge_stale_series();
         let _ = self.metrics.push();
 
@@ -3270,6 +3355,83 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    // ─── completion criteria: a declared knob binds (godon#416) ───
+
+    fn seeded_record(n: i64) -> TrialRecord {
+        TrialRecord {
+            number: n,
+            kind: "hold".into(),
+            params: json!({}),
+            value: Some(0.5),
+            state: "COMPLETE".into(),
+            error: None,
+            attrs: json!({}),
+            created_ts: None,
+            finished_ts: None,
+            values: vec![0.5],
+        }
+    }
+
+    #[test]
+    fn timing_end_parses_units_and_bare_seconds() {
+        let cc = |end: Value| json!({"timing": {"end": end}});
+        assert_eq!(timing_end_secs(&cc(json!("30m"))), Some(1800));
+        assert_eq!(timing_end_secs(&cc(json!("2h"))), Some(7200));
+        assert_eq!(timing_end_secs(&cc(json!("45s"))), Some(45));
+        assert_eq!(timing_end_secs(&cc(json!(90))), Some(90));
+        assert_eq!(timing_end_secs(&cc(json!("soon"))), None);
+        assert_eq!(timing_end_secs(&json!({})), None);
+    }
+
+    #[test]
+    fn iterations_max_stops_the_walk() {
+        let config = base_config(json!({
+            "run": {"parallel": 1, "completion_criteria": {
+                "iterations": {"min": 1, "max": 2}
+            }}
+        }));
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.0.lock().unwrap().trials.push(seeded_record(1));
+        ledger.0.lock().unwrap().trials.push(seeded_record(2));
+        let coord = FakeCoord::new(vec![], vec![true]);
+        let mut w = make_worker(config, ledger, coord, FakeWmill::new(vec![]), BTreeMap::new());
+        // 2 banked at a declared max of 2: the ceiling binds - found
+        // live 2026-10-24 (walkers ran 216/225/225 past max=150)
+        assert!(!w.worker_should_continue().unwrap());
+    }
+
+    #[test]
+    fn iterations_min_holds_the_walk_open() {
+        let config = base_config(json!({
+            "run": {"parallel": 1, "completion_criteria": {
+                "iterations": {"min": 5, "max": 100}
+            }}
+        }));
+        let ledger = Arc::new(FakeLedger::new());
+        ledger.0.lock().unwrap().trials.push(seeded_record(1));
+        ledger.0.lock().unwrap().trials.push(seeded_record(2));
+        // char_complete: true - the curve says done at 2 banked; the
+        // floor says walk on (room-2's node-1: a 25-trial self-stop
+        // left the declared minimum unreachable)
+        let coord = FakeCoord::new(vec![], vec![true]);
+        let mut w = make_worker(config, ledger, coord, FakeWmill::new(vec![]), BTreeMap::new());
+        assert!(w.worker_should_continue().unwrap());
+    }
+
+    #[test]
+    fn timing_end_reached_stops_the_walk() {
+        let config = base_config(json!({
+            "run": {"parallel": 1, "completion_criteria": {
+                "timing": {"end": "0s"}
+            }}
+        }));
+        let ledger = Arc::new(FakeLedger::new());
+        let coord = FakeCoord::new(vec![], vec![true]);
+        let mut w = make_worker(config, ledger, coord, FakeWmill::new(vec![]), BTreeMap::new());
+        w.run_started = Some(std::time::Instant::now());
+        assert!(!w.worker_should_continue().unwrap());
     }
 
     // ─── TestExecuteTrial ───
