@@ -645,4 +645,170 @@ mod tests {
         assert_eq!(ret["verdict"], json!(RETURNED));
         assert!(ret["finding"].is_null());
     }
+
+    // ── the launch dice: SplitMix64 pinned to an independently derived
+    //    golden sequence (python re-implementation of the published
+    //    algorithm, cross-language parity style) ──
+
+    #[test]
+    fn splitmix64_seed_zero_and_forty_two_play_the_published_sequences() {
+        let mut d = SplitMix64(0);
+        let expected0 = [
+            0.8833108082136426,
+            0.43152799704850997,
+            0.026433771592597743,
+            0.9708819781538285,
+            0.10634669156721244,
+            0.32732576421812576,
+        ];
+        for e in expected0 {
+            assert_eq!(d.uniform(0.0, 1.0), e);
+        }
+
+        let mut d = SplitMix64(42);
+        let expected42 = [
+            0.7415648787718233,
+            0.1599103928769201,
+            0.27860113025513866,
+            0.34419071652363753,
+            0.03803016854024621,
+            0.8682280765465323,
+        ];
+        for e in expected42 {
+            assert_eq!(d.uniform(0.0, 1.0), e);
+        }
+    }
+
+    #[test]
+    fn uniform_scales_the_sequence_into_the_band() {
+        let mut d = SplitMix64(0);
+        assert_eq!(d.uniform(10.0, 20.0), 18.833108082136427);
+        assert_eq!(d.uniform(10.0, 20.0), 14.3152799704851);
+        assert_eq!(d.uniform(10.0, 20.0), 10.264337715925977);
+    }
+
+    #[test]
+    fn randint_plays_the_derived_draws_inclusive() {
+        let mut d = SplitMix64(42);
+        let expected = [5i64, 1, 2, 3, 1, 6];
+        for e in expected {
+            assert_eq!(d.randint(1, 6), e);
+        }
+    }
+
+    #[test]
+    fn the_dice_stay_in_their_bands_and_vary() {
+        let mut d = SplitMix64(7);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..1000 {
+            let v = d.uniform(0.0, 1.0);
+            assert!((0.0..1.0).contains(&v));
+            seen.insert(v.to_bits());
+        }
+        assert!(seen.len() > 990, "a thousand draws must barely repeat");
+
+        let mut d = SplitMix64(7);
+        for _ in 0..1000 {
+            let n = d.randint(3, 9);
+            assert!((3..=9).contains(&n));
+        }
+    }
+
+    // ── the refusal's rendered word ──
+
+    #[test]
+    fn a_refusal_renders_reason_and_detail_exactly() {
+        let bare = SeekRefused::new("empty_region", "");
+        assert_eq!(bare.to_string(), "empty_region");
+        let detailed = SeekRefused::new("unknown_form", "gnarf");
+        assert_eq!(detailed.to_string(), "unknown_form: gnarf");
+    }
+
+    // ── rank: the declared compass, never chosen ──
+
+    fn finding(reading: f64) -> Finding {
+        Finding {
+            params: Map::new(),
+            reading,
+            bars: 0.0,
+        }
+    }
+
+    #[test]
+    fn rank_maximize_picks_the_highest_reading() {
+        let fs = [finding(1.0), finding(3.0), finding(2.0)];
+        assert_eq!(rank(&fs, MAXIMIZE).unwrap().reading, 3.0);
+    }
+
+    #[test]
+    fn rank_minimize_picks_the_lowest_reading() {
+        let fs = [finding(1.0), finding(3.0), finding(2.0)];
+        assert_eq!(rank(&fs, MINIMIZE).unwrap().reading, 1.0);
+    }
+
+    #[test]
+    fn rank_ties_keep_the_first_and_empty_answers_none() {
+        let fs = [finding(2.0), finding(2.0)];
+        // equal readings never displace the incumbent
+        assert!(rank(&fs, MAXIMIZE).is_some());
+        // None is None — Finding carries no PartialEq, so assert the shape, not equality
+        assert!(rank(&[], MAXIMIZE).is_none());
+    }
+
+    // ── the wallet: one trial, one unit ──
+
+    #[test]
+    fn the_wallet_pays_zero_and_refuses_debits() {
+        let mut w = Wallet::new(10);
+        assert!(w.pay(0).is_ok(), "zero-cost trials are free");
+        assert_eq!(w.spent, 0);
+        assert!(w.pay(3).is_ok());
+        assert_eq!(w.spent, 3);
+        assert!(w.pay(-1).is_err());
+        assert_eq!(w.spent, 3, "a refused debit must not move the ledger");
+    }
+
+    // ── the door's refusals: the criterion and the ranges ──
+
+    fn plan(form: &str, region: Vec<(&str, f64, f64, bool)>, criterion: Option<Value>) -> SeekPlan {
+        let mut r = Region::new();
+        for (name, lo, hi, is_int) in region {
+            r.insert(name.to_string(), (lo, hi, is_int));
+        }
+        SeekPlan {
+            wish_id: "w".into(),
+            tender: "tender-one".into(),
+            form: form.into(),
+            region: r,
+            criterion: criterion.map(|c| c.as_object().cloned().unwrap_or_default()),
+            budget: 5,
+            candidates: 2,
+        }
+    }
+
+    #[test]
+    fn find_best_without_a_live_outcome_criterion_is_refused() {
+        let mut p = plan(
+            FIND_BEST,
+            vec![("dial", 0.0, 10.0, false)],
+            Some(json!({"outcome": null, "direction": "max"})),
+        );
+        let err = p.validate().unwrap_err();
+        assert_eq!(err.reason, "undeclared_criterion");
+    }
+
+    #[test]
+    fn an_empty_or_inverted_range_is_refused_at_the_door() {
+        let mut p = plan(COVER_NOW, vec![("dial", 5.0, 5.0, false)], None);
+        assert_eq!(p.validate().unwrap_err().reason, "empty_range");
+
+        let mut p = plan(COVER_NOW, vec![("dial", 10.0, 0.0, false)], None);
+        assert_eq!(p.validate().unwrap_err().reason, "empty_range");
+    }
+
+    #[test]
+    fn a_non_integer_reading_on_an_integer_dial_is_refused() {
+        let mut p = plan(COVER_NOW, vec![("dial", 0.5, 3.5, true)], None);
+        assert_eq!(p.validate().unwrap_err().reason, "non_integer_range");
+    }
 }
