@@ -811,4 +811,28 @@ mod tests {
         let mut p = plan(COVER_NOW, vec![("dial", 0.5, 3.5, true)], None);
         assert_eq!(p.validate().unwrap_err().reason, "non_integer_range");
     }
+
+    // ── wave 3: the survivor map's parse_seek_plan door ──
+
+    #[test]
+    fn two_element_region_entries_parse() {
+        // [lo, hi] alone is the wish page's own wire shape — is_int
+        // defaults false. a two-bound entry must ADMIT, never refuse
+        let p = parse_seek_plan(&base_plan(json!({
+            "region": {"a": [10.0, 50.0]}
+        })))
+        .unwrap();
+        assert_eq!(p.region["a"], (10.0, 50.0, false));
+    }
+
+    #[test]
+    fn short_region_entries_refuse_named() {
+        // fewer than two bounds cannot name a range — the refusal
+        // carries the dial's own name
+        for short in [json!([]), json!([1.0])] {
+            let err = parse_seek_plan(&base_plan(json!({"region": {"a": short}}))).unwrap_err();
+            assert_eq!(err.reason, "bad_region");
+            assert_eq!(err.detail, "a");
+        }
+    }
 }
