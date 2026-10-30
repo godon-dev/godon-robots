@@ -181,4 +181,34 @@ mod tests {
         }
         assert_eq!(measured.len(), 9); // full enumeration, always
     }
+
+    // ── wave 3: the survivor map's region_policy arithmetic ──
+    // oracles hand-derived in the comments (the estate's oracle habit)
+
+    #[test]
+    fn int_center_is_half_the_sum_not_the_product() {
+        // bounds 0..10, six already taken: center (0+10)/2 = 5 is free and
+        // nearest; a product center (0*10)/2 = 0 crowns 0 instead
+        let mut policy = region_policy(region(&[("n", (0.0, 10.0, true))]));
+        assert_eq!(policy("n", &[6.0]), Some(5.0));
+    }
+
+    #[test]
+    fn int_first_candidate_always_competes() {
+        // bounds 0..9, nothing measured: center 4.5, nearest ints 4 and 5,
+        // tie to the larger → 5. if the first candidate could never take
+        // its seat (&& for ||), the crown stays with cands[0] = 0
+        let mut policy = region_policy(region(&[("n", (0.0, 9.0, true))]));
+        assert_eq!(policy("n", &[]), Some(5.0));
+    }
+
+    #[test]
+    fn the_floor_spans_the_range_not_the_sum() {
+        // bounds 20..40 with 30 measured: floor (40-20)/4 = 5 keeps
+        // 20/25/35/40 alive (distances 10/5/5/10) and the far tie crowns
+        // 40; a sum floor (40+20)/4 = 15 starves every candidate and
+        // ends the dial one probe early
+        let mut policy = region_policy(region(&[("a", (20.0, 40.0, false))]));
+        assert_eq!(policy("a", &[30.0]), Some(40.0));
+    }
 }
