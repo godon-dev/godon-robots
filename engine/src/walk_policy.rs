@@ -546,4 +546,206 @@ mod tests {
         assert_eq!(st["p0"].step, 25.0);
         assert_eq!(st["p0"].levels_total, Some(5));
     }
+
+    fn single_param_bounds(lo: f64, hi: f64, is_int: bool) -> Bounds {
+        [("p0".to_string(), (lo, hi, is_int))].into_iter().collect()
+    }
+
+    fn policy_over(t: StubTransport, bounds: &Bounds) -> WalkPolicy {
+        WalkPolicy::new(
+            "http://causal.test/",
+            "g",
+            "t-1",
+            3,
+            bounds,
+            std::sync::Arc::new(t),
+        )
+    }
+
+    #[test]
+    fn walk_error_renders_its_two_words() {
+        assert_eq!(
+            WalkError::Unavailable("x".into()).to_string(),
+            "view unavailable: x"
+        );
+        assert_eq!(WalkError::Loud("y".into()).to_string(), "walk error: y");
+    }
+
+    #[test]
+    fn depth_carries_the_refinement_depth() {
+        // 3 is none of 0, 1, -1 — the carried depth must survive
+        let p = policy(StubTransport::new(vec![]));
+        assert_eq!(p.depth(), 3);
+    }
+
+    #[test]
+    fn equal_ignorance_the_wider_bracket_wins() {
+        // key order: ignorance first, then WIDTH as a difference
+        // to-minus-from. Three equal-priced brackets with widths
+        // 2 / 8 / 1 — only the difference crowns the 1..9 one
+        let view = json!({
+            "curves": [{
+                "levels": [],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 1000.0, "to_level": 1002.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 1.0, "to_level": 9.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 0.1, "to_level": 1.1}
+                ]
+            }]
+        });
+        // a product instead crowns the 1000..1002 one, a quotient the
+        // 0.1..1.1 one
+        let mid = WalkPolicy::fattest_bracket_midpoint(&view, 0.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid, 5.0);
+    }
+
+    #[test]
+    fn equal_price_the_closer_midpoint_wins() {
+        // third key: NEGATED distance to center, so closer wins. With
+        // center -100 the mid-14 bracket is closer (114 < 134); a
+        // dropped or plus-replaced minus in (mid - center) measures
+        // 86 vs 66 and crowns the mid-34 one
+        let view = json!({
+            "curves": [{
+                "levels": [],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 10.0, "to_level": 18.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 30.0, "to_level": 38.0}
+                ]
+            }]
+        });
+        let mid = WalkPolicy::fattest_bracket_midpoint(&view, -100.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid, 14.0);
+    }
+
+    #[test]
+    fn the_distance_is_a_difference_not_a_ratio() {
+        // |m - c| must SUBTRACT: with center -60, mid -50 is closer
+        // (10 vs 70). A quotient |m / c| inverts the order
+        // (0.83 vs 0.17) and crowns mid 10 instead
+        let view = json!({
+            "curves": [{
+                "levels": [],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": -54.0, "to_level": -46.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 6.0, "to_level": 14.0}
+                ]
+            }]
+        });
+        let mid = WalkPolicy::fattest_bracket_midpoint(&view, -60.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid, -50.0);
+    }
+
+    #[test]
+    fn compass_center_is_half_the_range_sum() {
+        // center = (lo + hi) / 2: bounds 3..100 put it at 51.5, closer
+        // to the mid-100 bracket (48.5 vs 51.5). A modulo or a
+        // difference in the center arithmetic lands at 1.0 or -48.5
+        // and crowns the mid-0 bracket instead
+        let view = json!({
+            "curves": [{
+                "levels": [51.5, 100.0, 3.0],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 96.0, "to_level": 104.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": -4.0, "to_level": 4.0}
+                ]
+            }]
+        });
+        let t = StubTransport::new(vec![Ok(view)]);
+        let p = policy_over(t, &single_param_bounds(3.0, 100.0, false));
+        // anchors 51.5 / 100 / 3 are all banked → the compass decides
+        assert_eq!(p.next_level("p0").unwrap(), Some(100.0));
+    }
+
+    #[test]
+    fn compass_center_is_not_the_geometric_mean() {
+        // same bounds, brackets at mid 250 and mid 25: the true center
+        // 51.5 keeps the compass on 25 (26.5 vs 198.5), while a
+        // product center — (lo*hi)/2 = 150 or (lo+hi)*2 = 206 —
+        // flips to the far bracket
+        let view = json!({
+            "curves": [{
+                "levels": [51.5, 100.0, 3.0],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 246.0, "to_level": 254.0},
+                    {"unresolved": true, "ignorance": 2.0, "bars_sum": 0.1,
+                     "from_level": 21.0, "to_level": 29.0}
+                ]
+            }]
+        });
+        let t = StubTransport::new(vec![Ok(view)]);
+        let p = policy_over(t, &single_param_bounds(3.0, 100.0, false));
+        assert_eq!(p.next_level("p0").unwrap(), Some(25.0));
+    }
+
+    #[test]
+    fn round_robin_advances_past_done_params() {
+        // a is done (anchors banked, gaps priced out), b still has its
+        // first anchor. The cursor must ADVANCE past a — a
+        // multiplication in its place pins the walk on a forever
+        let done = json!({
+            "curves": [{
+                "levels": [50.0, 100.0, 0.0],
+                "gaps": [
+                    {"unresolved": true, "ignorance": 0.05, "bars_sum": 0.1,
+                     "from_level": 50.0, "to_level": 100.0}
+                ]
+            }]
+        });
+        let t = StubTransport::new(vec![Ok(done), view_with_levels(&[])]);
+        let mut b = Bounds::new();
+        b.insert("a".to_string(), (0.0, 100.0, false));
+        b.insert("b".to_string(), (0.0, 100.0, false));
+        let mut p = policy_over(t, &b);
+        let skip = HashSet::new();
+        assert_eq!(p.next_probe(&skip).unwrap(), Some(("b".to_string(), 50.0)));
+    }
+
+    #[test]
+    fn can_probe_is_true_when_work_remains() {
+        // an empty notebook leaves the first anchor unbanked — work
+        // remains, so the verdict is true, never a hardcoded false
+        let t = StubTransport::new(vec![view_with_levels(&[])]);
+        let mut p = policy(t);
+        let skip = HashSet::new();
+        assert!(p.can_probe(&skip).unwrap());
+    }
+
+    #[test]
+    fn int_total_spans_the_rounded_range_inclusive() {
+        // integer dial 2..10: step 1, total = 10 - 2 + 1 = 9 points
+        let t = StubTransport::new(vec![view_with_levels(&[2.0, 10.0])]);
+        let p = policy_over(t, &single_param_bounds(2.0, 10.0, true));
+        let st = p.status();
+        assert_eq!(st["p0"].step, 1.0);
+        assert_eq!(st["p0"].levels_total, Some(9));
+    }
+
+    #[test]
+    fn float_step_and_total_from_a_nonzero_floor() {
+        // float dial 10..20 at floor 0: step = (20-10)/2^2 = 2.5,
+        // total = (20-10)/2.5 + 1 = 5 — a zero floor hides the
+        // difference between hi-lo and hi+lo, this one cannot
+        let t = StubTransport::new(vec![view_with_levels(&[10.0, 20.0])]);
+        let p = policy_over(t, &single_param_bounds(10.0, 20.0, false));
+        let st = p.status();
+        assert_eq!(st["p0"].step, 2.5);
+        assert_eq!(st["p0"].levels_total, Some(5));
+    }
 }
