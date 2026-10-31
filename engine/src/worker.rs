@@ -149,9 +149,14 @@ impl WorkerConfig {
 ///    and stays true while holding, but a holder does not act on it —
 ///    the wish is a standing service on the wish's own budget, and
 ///    leaving would strand its assignment in a dead tender's ledger.
-/// 3. Quiet-bench lever: with no wish held and the characterization
-///    walk complete, the tender lets itself out — finished walkers
-///    leave, the room goes still for whatever comes next.
+/// 3. Standing watch (holder ruling, 2026-10-31, room thirteen's
+///    follow-through): with no wish held and the walk complete, the
+///    tender no longer lets itself out — it parks and keeps sampling
+///    the outcome on the watch cadence. The tender is the estate's
+///    only looker; a departed watcher watches nothing, and the slot
+///    is the accepted price of an estate that tends. Drift off the
+///    finished map's resting reading is the watch's event (WALK
+///    DRIFT); the re-open it feeds is the gavel family's own motion.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// stop, with the reason the log line carries
@@ -174,11 +179,6 @@ pub fn should_continue(
         return Verdict::Continue {
             pin_fired: walk_complete && !pin_receipt_current,
         };
-    }
-    if walk_complete {
-        return Verdict::Stop(
-            "Stopping: characterization complete — walks done, leaving the bench quiet",
-        );
     }
     Verdict::Continue { pin_fired: false }
 }
@@ -334,10 +334,12 @@ mod tests {
             should_continue(false, true, true, true),
             Continue { pin_fired: false }
         );
-        // no wish + walk complete: the quiet-bench lever
+        // no wish + walk complete: standing watch (holder ruling,
+        // 2026-10-31) — the finished walker parks and samples, it no
+        // longer leaves
         assert_eq!(
             should_continue(false, false, true, false),
-            Stop("Stopping: characterization complete — walks done, leaving the bench quiet")
+            Continue { pin_fired: false }
         );
         // walk not complete, no wish: keep going
         assert_eq!(
