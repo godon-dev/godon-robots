@@ -70,8 +70,34 @@ pub trait HttpTransport: Send + Sync {
 /// own cadence. A 2 s guard on view reads is the caller's choice (the
 /// python `_urllib_transport` receipt, same number); the coordinator's
 /// causal calls pass their own adaptive timeout.
+///
+/// ONE client for the process, held for its life (trial-cost census
+/// 2026-10-31: a builder-per-call meant a fresh pool + TCP per consult
+/// — 8+ fresh connections per trial). The per-call timeout moves to
+/// the request (`RequestBuilder::timeout`), so the callers' own
+/// cadence (2 s views, adaptive causal, 10 s wish plans) is unchanged.
 #[derive(Default)]
 pub struct ReqwestTransport;
+
+impl ReqwestTransport {
+    /// The shared client, or the reason it could not be built (a
+    /// build failure is DARK, never a panic — the walk parks on a
+    /// dark call; a panic would kill the worker).
+    fn client() -> Result<&'static reqwest::blocking::Client, String> {
+        static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+            std::sync::OnceLock::new();
+        match CLIENT.get_or_init(|| {
+            // No client-level timeout: every call sets its own on the
+            // request. No TLS (the estate's causal URL is plain http).
+            reqwest::blocking::Client::builder()
+                .build()
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(client) => Ok(client),
+            Err(msg) => Err(msg.clone()),
+        }
+    }
+}
 
 impl HttpTransport for ReqwestTransport {
     fn call(
@@ -81,15 +107,13 @@ impl HttpTransport for ReqwestTransport {
         payload: Option<&Value>,
         timeout: Duration,
     ) -> Result<Value, HttpError> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| HttpError::Dark(e.to_string()))?;
+        let client = Self::client().map_err(HttpError::Dark)?;
         let mut req = match method {
             "GET" => client.get(url),
             "POST" => client.post(url),
             m => return Err(HttpError::Dark(format!("unsupported method {m}"))),
         };
+        req = req.timeout(timeout);
         if let Some(p) = payload {
             req = req.json(p);
         }
