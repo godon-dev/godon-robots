@@ -273,17 +273,156 @@ fn object_or_empty(v: Value) -> Value {
     }
 }
 
-/// The trial ledger — per-verb short connections; a transient takes a
-/// retry, never a lost trial.
+/// One held connection for a single-threaded user (the trial loop's
+/// verbs) — the trial-cost census cure (2026-10-31): per-verb connect
+/// was ~2-4 round trips of pure handshake, ~25 times per trial.
+///
+/// Semantics preserved from the per-verb shape:
+/// - one transaction per write verb (`run_tx`): BEGIN, op, COMMIT —
+///   a failed attempt never committed, so the ladder's op re-run is
+///   clean (the 2026-10-23 exit-139 contract).
+/// - reads run autocommit (`run_read`): a lone SELECT inside its own
+///   tx sees exactly what an autocommit SELECT sees under READ
+///   COMMITTED; the BEGIN/COMMIT around it was round trips, not
+///   isolation.
+/// - any error DROPS the connection — the next attempt (this verb's
+///   ladder step or the next verb) reconnects fresh. A stale or
+///   poisoned socket never survives an error.
+/// - the slot is NOT a shared pool: one user thread. Concurrent users
+///   (the beat thread) keep their own per-verb `DsnConnect`.
+pub struct ConnSlot {
+    dsn: String,
+    client: std::sync::Mutex<Option<postgres::Client>>,
+}
+
+impl std::fmt::Debug for ConnSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the client itself is not Debug; the held-ness is the shape
+        // (poison-tolerant: Debug must never be the thing that panics)
+        let held = self
+            .client
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some();
+        f.debug_struct("ConnSlot")
+            .field("dsn", &self.dsn)
+            .field("held", &held)
+            .finish()
+    }
+}
+
+impl ConnSlot {
+    pub fn new(dsn: &str) -> Self {
+        ConnSlot {
+            dsn: dsn.to_string(),
+            client: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn checkout(&self) -> Result<postgres::Client, DbError> {
+        // poison-tolerant (into_inner): the slot is single-threaded by
+        // construction; a poisoned lock must not cascade into every
+        // later verb — take the client out whatever happened elsewhere.
+        let held = self.client.lock().unwrap_or_else(|p| p.into_inner()).take();
+        match held {
+            Some(conn) => Ok(conn),
+            None => {
+                // connect OUTSIDE the lock — the handshake is IO, the
+                // lock only guards the take/put
+                postgres::Client::connect(self.dsn.as_str(), postgres::NoTls).map_err(DbError::from)
+            }
+        }
+    }
+
+    fn checkin(&self, conn: postgres::Client) {
+        *self.client.lock().unwrap_or_else(|p| p.into_inner()) = Some(conn);
+    }
+
+    /// ONE attempt, no ladder — for callers that own their own retry
+    /// cadence (the worker's shared-db wrapper). Autocommit on the
+    /// held connection; any error drops it.
+    pub fn run_once<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Client) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let mut conn = self.checkout()?;
+        let attempt = op(&mut conn);
+        if attempt.is_ok() {
+            self.checkin(conn);
+        }
+        attempt
+    }
+
+    /// Write verbs: ladder around one-tx-per-attempt on the held conn.
+    pub fn run_tx<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Transaction) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        retry_ladder(
+            &mut |secs| std::thread::sleep(std::time::Duration::from_secs_f64(secs)),
+            || {
+                let mut conn = self.checkout()?;
+                let attempt = (|| -> Result<T, DbError> {
+                    let mut tx = conn.transaction().map_err(DbError::from)?;
+                    let out = op(&mut tx)?;
+                    tx.commit().map_err(DbError::from)?;
+                    Ok(out)
+                })();
+                // success returns the conn to the slot; ANY error drops
+                // it — a failed transaction leaves the socket suspect.
+                if attempt.is_ok() {
+                    self.checkin(conn);
+                }
+                attempt
+            },
+        )
+    }
+
+    /// Read verbs: ladder around an autocommit statement on the held
+    /// conn (see the type doc — the tx wrapper bought nothing).
+    pub fn run_read<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Client) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        retry_ladder(
+            &mut |secs| std::thread::sleep(std::time::Duration::from_secs_f64(secs)),
+            || {
+                let mut conn = self.checkout()?;
+                let attempt = op(&mut conn);
+                if attempt.is_ok() {
+                    self.checkin(conn);
+                }
+                attempt
+            },
+        )
+    }
+}
+
+/// The trial ledger — per-verb connections (the python original's own
+/// cadence), or ONE held connection for the trial loop when built
+/// pooled (the trial-cost cure: same verbs, same transactions, no
+/// handshake per verb). A transient takes a retry, never a lost trial.
 #[derive(Clone, Debug)]
 pub struct TrialLedger<C: Connect = DsnConnect> {
     connect: C,
+    pool: Option<std::sync::Arc<ConnSlot>>,
 }
 
 impl TrialLedger<DsnConnect> {
     pub fn new(dsn: &str) -> Result<Self, DbError> {
         Ok(TrialLedger {
             connect: DsnConnect::new(dsn)?,
+            pool: None,
+        })
+    }
+
+    /// The trial loop's ledger: one held connection behind the same
+    /// retry ladder (see [`ConnSlot`]). Single-threaded by
+    /// construction — the trial loop is the only caller.
+    pub fn new_pooled(dsn: &str) -> Result<Self, DbError> {
+        Ok(TrialLedger {
+            connect: DsnConnect::new(dsn)?,
+            pool: Some(std::sync::Arc::new(ConnSlot::new(dsn))),
         })
     }
 }
@@ -291,7 +430,8 @@ impl TrialLedger<DsnConnect> {
 impl<C: Connect> TrialLedger<C> {
     /// One attempt = connect, one transaction, op, commit — the
     /// python original's `connect / cursor / fn / commit / close`
-    /// shape; the connection closes on drop either way.
+    /// shape; the connection closes on drop either way. Pooled build:
+    /// the same one-transaction shape on the held connection.
     fn with_conn<T>(
         &self,
         mut op: impl FnMut(&mut postgres::Transaction) -> Result<T, DbError>,
@@ -303,6 +443,9 @@ impl<C: Connect> TrialLedger<C> {
         // armed the ladder's second attempt into a panic ("one op per
         // attempt") — the first transient failure killed the worker
         // (live receipt 2026-10-23, job 01a16831-fb23, exit 139).
+        if let Some(pool) = &self.pool {
+            return pool.run_tx(|tx| op(tx));
+        }
         retry_ladder(
             &mut |secs| std::thread::sleep(std::time::Duration::from_secs_f64(secs)),
             || {
@@ -311,6 +454,26 @@ impl<C: Connect> TrialLedger<C> {
                 let result = op(&mut tx)?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(result)
+            },
+        )
+    }
+
+    /// Read verbs: autocommit on the held/pooled connection, or a
+    /// per-verb connection in the unpooled shape. A lone SELECT in its
+    /// own transaction and an autocommit SELECT read the same
+    /// committed state — the wrapper was round trips, not isolation.
+    fn with_read<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Client) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        if let Some(pool) = &self.pool {
+            return pool.run_read(|client| op(client));
+        }
+        retry_ladder(
+            &mut |secs| std::thread::sleep(std::time::Duration::from_secs_f64(secs)),
+            || {
+                let mut conn = self.connect.connect()?;
+                op(&mut conn)
             },
         )
     }
@@ -344,6 +507,19 @@ impl<C: Connect> TrialLedger<C> {
                         .map_err(DbError::from)?;
                 }
             }
+            // The wish-assignment table, created/migrated at boot —
+            // the python made this DDL on every wish_latest READ; the
+            // census (2026-10-31) moved it here (idempotent, one tx).
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS wish_assignments (wish_id TEXT PRIMARY KEY, assigned_tsz DOUBLE PRECISION NOT NULL)",
+                &[],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "ALTER TABLE wish_assignments ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'sender'",
+                &[],
+            )
+            .map_err(DbError::from)?;
             Ok(current)
         })
     }
@@ -399,6 +575,34 @@ impl<C: Connect> TrialLedger<C> {
         })
     }
 
+    /// The evidence flush: the classification and the decision's
+    /// stamps in ONE transaction (the census cure — was ~12
+    /// one-connection transactions). Same bytes as the sequential
+    /// shape: the kind UPDATE verbatim, the attrs merge over disjoint
+    /// keys.
+    pub fn write_evidence(
+        &self,
+        number: i64,
+        kind: &str,
+        values: &Map<String, Value>,
+    ) -> Result<(), DbError> {
+        let payload = pyjson::py_dumps(&Value::Object(values.clone()));
+        let payload: Value = serde_json::from_str(&payload)?;
+        self.with_conn(|tx| {
+            tx.execute(
+                "UPDATE trials SET kind = $1 WHERE number = $2",
+                &[&kind, &number],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "UPDATE trials SET attrs = attrs || $1::jsonb WHERE number = $2",
+                &[&payload, &number],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+    }
+
     pub fn complete(&self, number: i64, value: Option<f64>) -> Result<(), DbError> {
         self.with_conn(|tx| {
             tx.execute(
@@ -439,8 +643,8 @@ impl<C: Connect> TrialLedger<C> {
     }
 
     pub fn state_get(&self, key: &str) -> Result<Option<String>, DbError> {
-        self.with_conn(|tx| {
-            let row = tx
+        self.with_read(|conn| {
+            let row = conn
                 .query_opt(
                     "SELECT value_json FROM ledger_state WHERE key = $1",
                     &[&key],
@@ -467,8 +671,8 @@ impl<C: Connect> TrialLedger<C> {
     /// All trials, number order. attrs decoded to a value; `values`
     /// mirrors the reader contract: one-element list when judged.
     pub fn trials(&self) -> Result<Vec<TrialRecord>, DbError> {
-        self.with_conn(|tx| {
-            let rows = tx
+        self.with_read(|conn| {
+            let rows = conn
                 .query(
                     "SELECT number, kind, params, value, state, error, attrs, CAST(created_ts AS TEXT), CAST(finished_ts AS TEXT) FROM trials ORDER BY number",
                     &[],
@@ -479,8 +683,8 @@ impl<C: Connect> TrialLedger<C> {
     }
 
     pub fn count(&self) -> Result<i64, DbError> {
-        self.with_conn(|tx| {
-            let row = tx
+        self.with_read(|conn| {
+            let row = conn
                 .query_one("SELECT COUNT(*) AS n FROM trials", &[])
                 .map_err(DbError::from)?;
             row.try_get::<_, i64>(0).map_err(DbError::from)
@@ -494,8 +698,8 @@ impl<C: Connect> TrialLedger<C> {
         let sql = format!(
             "SELECT number, kind, params, value, state, error, attrs, CAST(created_ts AS TEXT), CAST(finished_ts AS TEXT) FROM trials WHERE state = 'COMPLETE' AND value IS NOT NULL ORDER BY value {order}, number ASC LIMIT 1"
         );
-        self.with_conn(|tx| {
-            let row = tx.query_opt(&sql, &[]).map_err(DbError::from)?;
+        self.with_read(|conn| {
+            let row = conn.query_opt(&sql, &[]).map_err(DbError::from)?;
             row.as_ref().map(TrialRecord::from_row).transpose()
         })
     }
@@ -509,8 +713,8 @@ impl<C: Connect> TrialLedger<C> {
     /// absence, never a transient error: deletion is the only thing
     /// that removes it.
     pub fn stop_requested(&self) -> Result<bool, DbError> {
-        self.with_conn(|tx| {
-            let row = match tx.query_opt(
+        self.with_read(|conn| {
+            let row = match conn.query_opt(
                 "SELECT shutdown_requested FROM systemtender_state LIMIT 1",
                 &[],
             ) {
@@ -532,20 +736,15 @@ impl<C: Connect> TrialLedger<C> {
     }
 
     /// The wish assignment row, if any: (wish_id, role) or None.
-    /// Creates/migrates the table exactly as the worker did.
+    /// The table's CREATE/migrate DDL lives at boot (ensure_schema) —
+    /// the census (2026-10-31) found it running EVERY trial on this
+    /// read; boot runs before the first check by construction (the
+    /// worker builds the ledger, then walks). The cross-DB writer
+    /// (worker's receiver notify) keeps its own DDL — it writes a
+    /// DIFFERENT tender's database.
     pub fn wish_latest(&self) -> Result<Option<(String, String)>, DbError> {
-        self.with_conn(|tx| {
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS wish_assignments (wish_id TEXT PRIMARY KEY, assigned_tsz DOUBLE PRECISION NOT NULL)",
-                &[],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "ALTER TABLE wish_assignments ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'sender'",
-                &[],
-            )
-            .map_err(DbError::from)?;
-            let row = tx
+        self.with_read(|conn| {
+            let row = conn
                 .query_opt(
                     "SELECT wish_id, COALESCE(role, 'sender') AS role FROM wish_assignments ORDER BY assigned_tsz DESC LIMIT 1",
                     &[],
@@ -939,7 +1138,10 @@ mod tests {
             fails_first: std::sync::atomic::AtomicUsize::new(1),
             connects: std::sync::atomic::AtomicUsize::new(0),
         };
-        let ledger = TrialLedger { connect };
+        let ledger = TrialLedger {
+            connect,
+            pool: None,
+        };
         ledger.ensure_schema().unwrap();
         ledger.state_put("retry_pin::with_conn", "re-ran").unwrap();
         let connects = ledger

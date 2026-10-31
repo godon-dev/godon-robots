@@ -41,6 +41,11 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     pub cooldown_trials: i64,
     pub active_window: i64,
     pub(crate) conn: C,
+    /// the held connection for the trial loop's coordination verbs
+    /// (the trial-cost census cure — same one-tx-per-write shape, no
+    /// handshake per verb; see [`crate::ledger::ConnSlot`]). None on
+    /// the injected/test shape.
+    pub(crate) pool: Option<Arc<crate::ledger::ConnSlot>>,
     /// the whole config, kept for the walk half's re-reads (hold_params,
     /// settings, walk_policy/walk_transport keys — python parity)
     pub(crate) config: Value,
@@ -108,12 +113,7 @@ impl ProbeCoordinator<DsnConnect> {
         hooks: CoordHooks,
         dsn: &str,
     ) -> Result<Self, DbError> {
-        Ok(Self::new(
-            systemtender_id,
-            config,
-            DsnConnect::new(dsn)?,
-            hooks,
-        ))
+        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?, hooks).with_pool(dsn))
     }
 }
 
@@ -156,6 +156,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(ACTIVE_SYSTEMTENDER_WINDOW_SECONDS),
             conn,
+            pool: None,
             config: config.clone(),
             lease_token: RefCell::new(0),
             http: hooks
@@ -202,6 +203,20 @@ impl<C: Connect> ProbeCoordinator<C> {
         }
     }
 
+    /// Attach the held connection (the production dsn shape) — the
+    /// trial loop's verbs stop paying a handshake each.
+    pub fn with_pool(mut self, dsn: &str) -> Self {
+        self.pool = Some(Arc::new(crate::ledger::ConnSlot::new(dsn)));
+        self
+    }
+
+    /// Attach an already-built slot (the worker's shared-db pool —
+    /// one conn for the standing-params publish and the coordination
+    /// verbs, both trial-thread users).
+    pub fn attach_pool(&mut self, pool: Arc<crate::ledger::ConnSlot>) {
+        self.pool = Some(pool);
+    }
+
     pub fn stale_interval(&self) -> i64 {
         STALE_SENDER_MULTIPLIER * WORST_CASE_TRIAL_SECONDS
     }
@@ -210,6 +225,9 @@ impl<C: Connect> ProbeCoordinator<C> {
         &self,
         mut op: impl FnMut(&mut postgres::Transaction<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
+        if let Some(pool) = &self.pool {
+            return pool.run_tx(|tx| op(tx));
+        }
         let mut sleeper = |s: f64| std::thread::sleep(Duration::from_secs_f64(s));
         retry_ladder(&mut sleeper, || {
             let mut client = self.conn.connect()?;
@@ -217,6 +235,25 @@ impl<C: Connect> ProbeCoordinator<C> {
             let out = op(&mut txn)?;
             txn.commit().map_err(DbError::from)?;
             Ok(out)
+        })
+    }
+
+    /// Read-only coordination verbs: autocommit on the held connection
+    /// (or a per-verb one) — a lone SELECT in its own tx and an
+    /// autocommit SELECT read the same committed state; the census
+    /// (2026-10-31) found the BEGIN/COMMIT wrapper was round trips,
+    /// not isolation. Write verbs keep [`Self::exec`]'s transaction.
+    pub(crate) fn exec_read<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Client) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        if let Some(pool) = &self.pool {
+            return pool.run_read(|client| op(client));
+        }
+        let mut sleeper = |s: f64| std::thread::sleep(Duration::from_secs_f64(s));
+        retry_ladder(&mut sleeper, || {
+            let mut client = self.conn.connect()?;
+            op(&mut client)
         })
     }
 
@@ -350,8 +387,8 @@ impl<C: Connect> ProbeCoordinator<C> {
              AND last_seen > NOW() - INTERVAL '{window} seconds' \
              AND walk_pending IS TRUE"
         );
-        self.exec(|txn| {
-            let rows = txn.query(
+        self.exec_read(|client| {
+            let rows = client.query(
                 &sql,
                 &[
                     &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
@@ -382,8 +419,8 @@ impl<C: Connect> ProbeCoordinator<C> {
              WHERE group_id = $1 AND systemtender_id <> $2 \
              AND last_seen > NOW() - INTERVAL '{window} seconds'"
         );
-        self.exec(|txn| {
-            let row = txn.query_one(
+        self.exec_read(|client| {
+            let row = client.query_one(
                 &sql,
                 &[
                     &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
@@ -700,8 +737,8 @@ impl<C: Connect> ProbeCoordinator<C> {
              AND h.group_id = $2 \
              AND h.last_seen > NOW() - INTERVAL '{window} seconds')"
         );
-        self.exec(|txn| {
-            let row = txn.query_one(
+        self.exec_read(|client| {
+            let row = client.query_one(
                 &sql,
                 &[
                     &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
@@ -735,8 +772,8 @@ impl<C: Connect> ProbeCoordinator<C> {
              AND h.group_id = $2 \
              AND h.last_seen > NOW() - INTERVAL '{window} seconds')"
         );
-        self.exec(|txn| {
-            let row = txn.query_opt(
+        self.exec_read(|client| {
+            let row = client.query_opt(
                 &sql,
                 &[
                     &self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync),
@@ -762,8 +799,8 @@ impl<C: Connect> ProbeCoordinator<C> {
             "SELECT COUNT(*) FROM interference_active_systemtenders \
              WHERE group_id = $1 AND last_seen > NOW() - INTERVAL '{window} seconds'"
         );
-        self.exec(|txn| {
-            let row = txn.query_one(
+        self.exec_read(|client| {
+            let row = client.query_one(
                 &sql,
                 &[&self.group_id as &(dyn postgres::types::ToSql + std::marker::Sync)],
             )?;

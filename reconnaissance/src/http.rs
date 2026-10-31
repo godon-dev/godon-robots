@@ -26,16 +26,37 @@ pub trait ReconHttp: Send + Sync {
 
 /// The production edge: reqwest blocking, no TLS, per-call timeout
 /// (the python passed `timeout=` per request).
+///
+/// ONE client for the process, held for its life (trial-cost census
+/// 2026-10-31: the sampling loop built a fresh client per GET — the
+/// bench saw a new connection per sample). Per-call timeout rides the
+/// request, unchanged.
 pub struct ReqwestReconHttp;
+
+impl ReqwestReconHttp {
+    /// Shared client; a build failure is Retryable-dark, never a panic
+    /// (the sampler retries, the trial parks at infinity — the
+    /// python's own degrade on a failed metric read).
+    fn client() -> Result<&'static reqwest::blocking::Client, String> {
+        static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+            std::sync::OnceLock::new();
+        match CLIENT.get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .build()
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(client) => Ok(client),
+            Err(msg) => Err(msg.clone()),
+        }
+    }
+}
 
 impl ReconHttp for ReqwestReconHttp {
     fn get_json(&self, url: &str, timeout_secs: f64) -> Result<Value, ReconHttpErr> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs_f64(timeout_secs))
-            .build()
-            .map_err(|e| ReconHttpErr::Retryable(e.to_string()))?;
+        let client = Self::client().map_err(ReconHttpErr::Retryable)?;
         let resp = client
             .get(url)
+            .timeout(std::time::Duration::from_secs_f64(timeout_secs))
             .send()
             .map_err(|e| ReconHttpErr::Retryable(e.to_string()))?;
         let status = resp.status().as_u16();

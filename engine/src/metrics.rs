@@ -34,8 +34,29 @@ pub trait PushTransport: Send + Sync {
 }
 
 /// Production transport: reqwest blocking, no TLS (the estate's
-/// pushgateway is in-cluster plain http).
+/// pushgateway is in-cluster plain http). ONE held client for the
+/// process (trial-cost census 2026-10-31: a builder per push made a
+/// fresh connection every 5-trial block). The `timeout` argument stays
+/// honored-exactly-as-before (unset at the request level) — pooling
+/// only, no failure-mode drift in this pass.
 pub struct ReqwestPushTransport;
+
+impl ReqwestPushTransport {
+    /// Shared client; a build failure returns Err (the push is
+    /// best-effort, logged and skipped — never a panic).
+    fn client() -> Result<&'static reqwest::blocking::Client, String> {
+        static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+            std::sync::OnceLock::new();
+        match CLIENT.get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .build()
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(client) => Ok(client),
+            Err(msg) => Err(msg.clone()),
+        }
+    }
+}
 
 impl PushTransport for ReqwestPushTransport {
     fn request(
@@ -45,9 +66,7 @@ impl PushTransport for ReqwestPushTransport {
         body: Option<&str>,
         _timeout: Duration,
     ) -> Result<(), String> {
-        let client = reqwest::blocking::Client::builder()
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = Self::client()?;
         let mut req = client.request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?,
             url,
@@ -417,6 +436,11 @@ mod tests {
         }
     }
 
+    // PUSH_METRICS_ENABLED is process state — the env-setting test and
+    // the default-enabled test race under parallel execution (a live
+    // CI flake, seen 1-in-3); the mutex serializes the two of them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn client(fail: bool) -> (SystemtenderMetricsClient, Arc<FakePush>) {
         let fake = Arc::new(FakePush {
             calls: Mutex::new(Vec::new()),
@@ -437,6 +461,7 @@ mod tests {
     // initialization: enabled by default, url respected
     #[test]
     fn initialization_enabled() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (c, _) = client(false);
         assert!(c.enabled);
         assert_eq!(c.pushgateway_url, "http://test-pushgateway:9091");
@@ -446,6 +471,7 @@ mod tests {
     // PUSH_METRICS_ENABLED=false disables everything
     #[test]
     fn initialization_disabled() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("PUSH_METRICS_ENABLED", "false");
         let (mut c, fake) = client(false);
         assert!(!c.enabled);

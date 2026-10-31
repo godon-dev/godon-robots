@@ -198,7 +198,7 @@ fn run_worker(args: &Value, deps: &ComponentDeps) -> Result<Value, String> {
     let port = std::env::var("GODON_ARCHIVE_DB_SERVICE_PORT").unwrap_or_else(|_| "5432".into());
     let dsn = format!("postgresql://{user}:{pw}@{host}:{port}/{tender_db}");
 
-    let ledger = Arc::new(TrialLedger::new(&dsn).map_err(|e| e.to_string())?);
+    let ledger = Arc::new(TrialLedger::new_pooled(&dsn).map_err(|e| e.to_string())?);
     let worker_deps = WorkerDeps::production(deps.wmill.clone(), &tender_db);
     type ProductionCoordinator = godon_engine::coordinator::ProbeCoordinator<
         Arc<dyn godon_engine::ledger::Connect + Send + Sync>,

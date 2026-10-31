@@ -95,6 +95,32 @@ pub trait Ledger {
     fn stop_requested(&self) -> Result<bool, DbError>;
     fn wish_latest(&self) -> Result<Option<(String, String)>, DbError>;
     fn wish_remove(&self, wish_id: &str) -> Result<(), DbError>;
+    /// Batched attrs write — the trial-cost census cure (2026-10-31):
+    /// the stamp ceremony's one-transaction-per-key shape collapsed
+    /// into one transaction per flush. Default: the sequential per-key
+    /// stamps (the injected fakes keep their recording shape); the
+    /// production ledger overrides with the single-transaction merge.
+    /// Keys are disjoint by construction; the merged attrs are
+    /// byte-identical to the sequential merges.
+    fn stamps(&self, number: i64, values: &Map<String, Value>) -> Result<(), DbError> {
+        for (key, value) in values {
+            self.stamp(number, key, value.clone())?;
+        }
+        Ok(())
+    }
+    /// The evidence flush — the trial's classification plus its
+    /// decision stamps in ONE transaction. Default: `set_kind` then
+    /// the sequential stamps; the production ledger overrides with the
+    /// two-statement single transaction.
+    fn write_evidence(
+        &self,
+        number: i64,
+        kind: &str,
+        values: &Map<String, Value>,
+    ) -> Result<(), DbError> {
+        self.set_kind(number, kind)?;
+        self.stamps(number, values)
+    }
 }
 
 impl<C: Connect> Ledger for TrialLedger<C> {
@@ -139,6 +165,18 @@ impl<C: Connect> Ledger for TrialLedger<C> {
     }
     fn wish_remove(&self, wish_id: &str) -> Result<(), DbError> {
         self.wish_remove(wish_id)
+    }
+    fn stamps(&self, number: i64, values: &Map<String, Value>) -> Result<(), DbError> {
+        // the inherent single-transaction batch (ledger::stamps)
+        TrialLedger::stamps(self, number, values)
+    }
+    fn write_evidence(
+        &self,
+        number: i64,
+        kind: &str,
+        values: &Map<String, Value>,
+    ) -> Result<(), DbError> {
+        TrialLedger::write_evidence(self, number, kind, values)
     }
 }
 
@@ -460,6 +498,11 @@ pub struct WorkerDeps {
     pub push_transport: Arc<dyn PushTransport>,
     /// connect by URL — the receiver-notification rows
     pub remote_db: RemoteDbConnect,
+    /// ONE held connection for the shared-db verbs (standing params,
+    /// coordination) — the census cure; None on the injected shape.
+    /// Trial-thread users only; the beat thread's own_db stays
+    /// per-verb by design (two threads, two connections).
+    pub shared_pool: Option<Arc<crate::ledger::ConnSlot>>,
     /// every internal sleep (retry ladders, bursts) — tests fast-forward
     pub sleeper: Arc<dyn Fn(f64) + Send + Sync>,
 }
@@ -492,6 +535,9 @@ impl WorkerDeps {
             http: Arc::new(crate::walk_policy::ReqwestTransport),
             push_transport: Arc::new(crate::metrics::ReqwestPushTransport),
             remote_db: Arc::new(|url: &str| crate::ledger::DsnConnect::new(url)?.connect()),
+            shared_pool: Some(Arc::new(crate::ledger::ConnSlot::new(&format!(
+                "postgresql://{user}:{pw}@{host}:{port}/archive_db"
+            )))),
             sleeper: Arc::new(|secs: f64| std::thread::sleep(Duration::from_secs_f64(secs))),
         }
     }
@@ -523,6 +569,9 @@ pub struct Worker<K: Coordinator> {
     pub coordinator: K,
     pub own_db: Arc<dyn Connect + Send + Sync>,
     pub shared_db: Arc<dyn Connect + Send + Sync>,
+    /// the shared-db held connection, when the deps built one (the
+    /// census cure; None on the injected shape) — see [`ConnSlot`]
+    pub shared_pool: Option<Arc<crate::ledger::ConnSlot>>,
     pub remote_db: RemoteDbConnect,
     pub wmill: Arc<dyn Wmill>,
     pub http: Arc<dyn HttpTransport>,
@@ -624,6 +673,7 @@ impl<K: Coordinator> Worker<K> {
             coordinator,
             own_db: deps.own_db.clone(),
             shared_db: deps.shared_db.clone(),
+            shared_pool: deps.shared_pool.clone(),
             remote_db: deps.remote_db.clone(),
             wmill: deps.wmill.clone(),
             http: deps.http.clone(),
@@ -694,7 +744,7 @@ impl<K: Coordinator> Worker<K> {
                 }
             }
         }));
-        let coordinator = ProbeCoordinator::new(
+        let mut coordinator = ProbeCoordinator::new(
             &WorkerConfig::from_value(&config)
                 .map(|c| c.systemtender_uuid)
                 .unwrap_or_else(|_| "unknown".to_string())
@@ -703,6 +753,11 @@ impl<K: Coordinator> Worker<K> {
             deps.shared_db.clone(),
             hooks,
         );
+        // the shared-db held connection — the coordination verbs stop
+        // paying a handshake each (the census cure)
+        if let Some(pool) = deps.shared_pool.clone() {
+            coordinator.attach_pool(pool);
+        }
         Worker::with_coordinator(config, deps, ledger, coordinator)
     }
 }
@@ -844,11 +899,17 @@ impl<K: Coordinator> Worker<K> {
         const MAX_RETRIES: usize = 4;
         let mut last: Option<DbError> = None;
         for attempt in 0..MAX_RETRIES {
-            match self
-                .shared_db
-                .connect()
-                .and_then(|mut client| op(&mut client))
-            {
+            // pooled: one held autocommit connection (the census cure);
+            // a failed attempt drops it, the ladder's next attempt
+            // reconnects — the per-verb shape's own discipline, kept.
+            let attempt_result = match &self.shared_pool {
+                Some(pool) => pool.run_once(|client| op(client)),
+                None => self
+                    .shared_db
+                    .connect()
+                    .and_then(|mut client| op(&mut client)),
+            };
+            match attempt_result {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     let retryable = worker_is_retryable(&e.to_string());
@@ -1179,6 +1240,21 @@ impl<K: Coordinator> Worker<K> {
         true
     }
 
+    /// The configured failure threshold for the active strategy.
+    fn rollback_threshold(&self) -> i64 {
+        let strategy_name = self
+            .rollback_config
+            .get("strategy")
+            .and_then(|s| s.as_str())
+            .unwrap_or("standard");
+        self.config
+            .get("rollback_strategies")
+            .and_then(|s| s.get(strategy_name))
+            .and_then(|s| s.get("consecutive_failures"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3)
+    }
+
     pub fn check_needs_rollback(&mut self) -> bool {
         if !self.rollback_enabled {
             return false;
@@ -1188,18 +1264,7 @@ impl<K: Coordinator> Worker<K> {
             .get("consecutive_failures")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let strategy_name = self
-            .rollback_config
-            .get("strategy")
-            .and_then(|s| s.as_str())
-            .unwrap_or("standard");
-        let threshold = self
-            .config
-            .get("rollback_strategies")
-            .and_then(|s| s.get(strategy_name))
-            .and_then(|s| s.get("consecutive_failures"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(3);
+        let threshold = self.rollback_threshold();
         if consecutive >= threshold {
             log::info!(
                 "Consecutive failures ({consecutive}) >= threshold ({threshold}), rollback needed"
@@ -1336,7 +1401,10 @@ impl<K: Coordinator> Worker<K> {
             + 1;
         state.insert("consecutive_failures".into(), json!(failures));
         log::info!("Guardrail violation detected. Consecutive failures: {failures}");
-        let needs = self.check_needs_rollback();
+        // judged from the state IN HAND — the second store read the old
+        // shape paid here read the same row it just loaded (census:
+        // redundant per-trial read)
+        let needs = failures >= self.rollback_threshold();
         let next = if needs { "needs_rollback" } else { "normal" };
         state.insert("state".into(), json!(next));
         self.update_rollback_state(state);
@@ -1941,6 +2009,13 @@ impl<K: Coordinator> Worker<K> {
 
     pub fn update_state(&mut self) -> Result<(), String> {
         let count = self.ledger.count().map_err(|e| e.to_string())?;
+        self.update_state_with(count)
+    }
+
+    /// The state refresh with the count ALREADY IN HAND — the 5-trial
+    /// block counts once for the gauge and the state both (the census:
+    /// the old shape read the same COUNT(*) twice per block).
+    fn update_state_with(&mut self, count: i64) -> Result<(), String> {
         let state = json!({
             "systemtender_id": self.systemtender_id,
             "total_trials": count,
@@ -2283,9 +2358,17 @@ impl<K: Coordinator> Worker<K> {
                     *trial_count += 1;
                     if (*trial_count).is_multiple_of(5) {
                         self.heartbeat_interference();
-                        self.update_state()?;
                         let count = self.ledger.count().map_err(|er| er.to_string())?;
+                        self.update_state_with(count)?;
                         self.metrics.set_total_trials(count);
+                        // best-check rides the block too (the census:
+                        // was a store read after EVERY success feeding
+                        // only a display gauge)
+                        if let Ok(Some(best)) =
+                            self.ledger.best_trial(self.dials.objective_minimizes())
+                        {
+                            self.metrics.set_best_value(best.value.unwrap_or(0.0));
+                        }
                         let _ = self.metrics.push();
                     }
                 }
@@ -2397,8 +2480,14 @@ impl<K: Coordinator> Worker<K> {
         let detection_mode = decision.mode;
         self.strategies_run.insert(detection_mode.to_string());
 
-        // The classification, written once — a dart carries its own
-        // kind; a joint random setting is a prior, never curve ground.
+        // The evidence flush: the classification plus the decision's
+        // why and the observer's stamps, ONE transaction (the
+        // trial-cost census cure, 2026-10-31: was ~12 single-key stamp
+        // transactions, each its own connection). Flushed BEFORE the
+        // effectuation — a crash mid-measure still leaves the
+        // decision's evidence banked (the alibi, kept — and
+        // all-or-nothing now, where the per-key shape could die
+        // mid-sequence and leave it partial).
         let coord_state = self.coordinator.get_state();
         let kind = classify(
             Some(detection_mode),
@@ -2407,135 +2496,80 @@ impl<K: Coordinator> Worker<K> {
             seek_dart,
             decision.ambience_probe,
         );
-        self.retry_op(&format!("ledger.set_kind (trial {trial_number})"), || {
-            self.ledger.set_kind(trial_number, &kind)
-        })
-        .map_err(|e| e.to_string())?;
-
         // The why, as evidence: everything but params (sorted, the one
         // writer — parse-equal to python's dumps)
-        let mut evidence = Map::new();
-        evidence.insert("mode".into(), json!(detection_mode));
+        let mut decision_evidence = Map::new();
+        decision_evidence.insert("mode".into(), json!(detection_mode));
         if let Some(phase) = decision.impulse_phase {
-            evidence.insert("impulse_phase".into(), json!(phase));
+            decision_evidence.insert("impulse_phase".into(), json!(phase));
         }
         if seek_dart {
-            evidence.insert("seek_dart".into(), json!(true));
+            decision_evidence.insert("seek_dart".into(), json!(true));
         }
         if let Some(p) = &decision.probe_param {
-            evidence.insert("probe_param".into(), json!(p));
+            decision_evidence.insert("probe_param".into(), json!(p));
         }
         if let Some(i) = decision.probe_param_idx {
-            evidence.insert("probe_param_idx".into(), json!(i));
+            decision_evidence.insert("probe_param_idx".into(), json!(i));
         }
         if let Some(l) = decision.probe_level {
-            evidence.insert("probe_level".into(), json!(l));
+            decision_evidence.insert("probe_level".into(), json!(l));
         }
         if let Some(lp) = &decision.lease_phase {
-            evidence.insert("lease_phase".into(), json!(lp));
+            decision_evidence.insert("lease_phase".into(), json!(lp));
         }
         if decision.detection_trial {
-            evidence.insert("detection_trial".into(), json!(true));
+            decision_evidence.insert("detection_trial".into(), json!(true));
         }
         if decision.ambience_probe {
-            evidence.insert("ambience_probe".into(), json!(true));
+            decision_evidence.insert("ambience_probe".into(), json!(true));
         }
         // (python also stamps `impulse_scale` when present — nothing
         // in the coordinator ever produced it; no field exists here)
-        self.retry_op(
-            &format!("ledger.stamp decision (trial {trial_number})"),
-            || {
-                self.ledger.stamp(
-                    trial_number,
-                    "decision",
-                    Value::String(py_dumps(&Value::Object(evidence.clone()))),
-                )
-            },
-        )
-        .map_err(|e| e.to_string())?;
-
+        let mut evidence_stamps = Map::new();
+        evidence_stamps.insert(
+            "decision".into(),
+            Value::String(py_dumps(&Value::Object(decision_evidence))),
+        );
         // the observer's stamps
-        self.retry_op(&format!("ledger.stamp mode (trial {trial_number})"), || {
-            self.ledger
-                .stamp(trial_number, "detection_mode", json!(detection_mode))
-        })
-        .map_err(|e| e.to_string())?;
+        evidence_stamps.insert("detection_mode".into(), json!(detection_mode));
         if let Some(wish) = &self.wish {
-            self.retry_op(&format!("ledger.stamp wish (trial {trial_number})"), || {
-                self.ledger
-                    .stamp(trial_number, "wish_id", json!(wish.wish_id))
-                    .and_then(|_| {
-                        self.ledger.stamp(
-                            trial_number,
-                            "role",
-                            json!(if detection_mode == "hold" {
-                                "hold"
-                            } else {
-                                "probe"
-                            }),
-                        )
-                    })
-            })
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("wish_id".into(), json!(wish.wish_id));
+            evidence_stamps.insert(
+                "role".into(),
+                json!(if detection_mode == "hold" {
+                    "hold"
+                } else {
+                    "probe"
+                }),
+            );
         }
-        self.retry_op(
-            &format!("ledger.stamp coord_state (trial {trial_number})"),
-            || {
-                self.ledger
-                    .stamp(trial_number, "coord_state", json!(coord_state.as_str()))
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        evidence_stamps.insert("coord_state".into(), json!(coord_state.as_str()));
         let char_status = self.coordinator.get_char_status();
-        self.retry_op(
-            &format!("ledger.stamp char_status (trial {trial_number})"),
-            || {
-                self.ledger
-                    .stamp(trial_number, "char_status", char_status.clone())
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        evidence_stamps.insert("char_status".into(), char_status);
         if let Some(phase) = decision.impulse_phase {
-            self.retry_op(
-                &format!("ledger.stamp impulse_phase (trial {trial_number})"),
-                || {
-                    self.ledger
-                        .stamp(trial_number, "impulse_phase", json!(phase))
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("impulse_phase".into(), json!(phase));
         }
         if let Some(param) = &decision.probe_param {
-            self.retry_op(
-                &format!("ledger.stamp probe_param (trial {trial_number})"),
-                || self.ledger.stamp(trial_number, "probe_param", json!(param)),
-            )
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("probe_param".into(), json!(param));
         }
         if let Some(idx) = decision.probe_param_idx {
-            self.retry_op(
-                &format!("ledger.stamp probe_param_idx (trial {trial_number})"),
-                || {
-                    self.ledger
-                        .stamp(trial_number, "probe_param_idx", json!(idx))
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("probe_param_idx".into(), json!(idx));
         }
         if let Some(level) = decision.probe_level {
-            self.retry_op(
-                &format!("ledger.stamp probe_level (trial {trial_number})"),
-                || self.ledger.stamp(trial_number, "probe_level", json!(level)),
-            )
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("probe_level".into(), json!(level));
         }
         if let Some(phase) = &decision.lease_phase {
-            self.retry_op(
-                &format!("ledger.stamp lease_phase (trial {trial_number})"),
-                || self.ledger.stamp(trial_number, "lease_phase", json!(phase)),
-            )
-            .map_err(|e| e.to_string())?;
+            evidence_stamps.insert("lease_phase".into(), json!(phase));
         }
+        self.retry_op(
+            &format!("ledger.evidence flush (trial {trial_number})"),
+            || {
+                self.ledger
+                    .write_evidence(trial_number, &kind, &evidence_stamps)
+            },
+        )
+        .map_err(|e| e.to_string())?;
 
         // Every trial's params arrive shaped from the coordinator —
         // the body never picks settings itself.
@@ -2570,6 +2604,11 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|g| g.as_array())
             .cloned()
             .unwrap_or_default();
+        // The readings flush: guardrail readings and observation
+        // signals, ONE transaction (was two) — recorded before the
+        // violation check, so a refused trial still carries what was
+        // read (today's order, kept).
+        let mut readings_stamps = Map::new();
         if !guardrails_config.is_empty() {
             let mut readings = Map::new();
             for g in &guardrails_config {
@@ -2591,17 +2630,10 @@ impl<K: Coordinator> Worker<K> {
                 }
             }
             if !readings.is_empty() {
-                self.retry_op(
-                    &format!("ledger.stamp guardrails (trial {trial_number})"),
-                    || {
-                        self.ledger.stamp(
-                            trial_number,
-                            "guardrails",
-                            Value::String(py_dumps(&Value::Object(readings.clone()))),
-                        )
-                    },
-                )
-                .map_err(|e| e.to_string())?;
+                readings_stamps.insert(
+                    "guardrails".into(),
+                    Value::String(py_dumps(&Value::Object(readings))),
+                );
             }
         }
 
@@ -2625,18 +2657,18 @@ impl<K: Coordinator> Worker<K> {
                 }
             }
             if !observation_readings.is_empty() {
-                self.retry_op(
-                    &format!("ledger.stamp observations (trial {trial_number})"),
-                    || {
-                        self.ledger.stamp(
-                            trial_number,
-                            "observations",
-                            Value::String(py_dumps(&Value::Object(observation_readings.clone()))),
-                        )
-                    },
-                )
-                .map_err(|e| e.to_string())?;
+                readings_stamps.insert(
+                    "observations".into(),
+                    Value::String(py_dumps(&Value::Object(observation_readings))),
+                );
             }
+        }
+        if !readings_stamps.is_empty() {
+            self.retry_op(
+                &format!("ledger.readings flush (trial {trial_number})"),
+                || self.ledger.stamps(trial_number, &readings_stamps),
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         if guardrails_violated {
@@ -2677,6 +2709,10 @@ impl<K: Coordinator> Worker<K> {
         if !missing.is_empty() {
             log::info!("Trial {trial_number} has None values for objectives: {missing:?}");
         }
+        // The results flush: the noise readout and the effectuation
+        // params, ONE transaction (was two). `complete` stays its own
+        // transaction at its own place — the rung-7 guard's order.
+        let mut results_stamps = Map::new();
         if !self.last_metric_noise.is_empty() {
             let noise = py_dumps(&Value::Object(
                 self.last_metric_noise
@@ -2684,26 +2720,16 @@ impl<K: Coordinator> Worker<K> {
                     .map(|(k, v)| (k.clone(), json!(v)))
                     .collect(),
             ));
-            self.retry_op(
-                &format!("ledger.stamp metric_noise (trial {trial_number})"),
-                || {
-                    self.ledger
-                        .stamp(trial_number, "metric_noise", json!(noise))
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            results_stamps.insert("metric_noise".into(), json!(noise));
         }
-
         // Stash effectuation params with the trial.
+        results_stamps.insert(
+            "effectuation_params".into(),
+            Value::String(py_dumps(&Value::Object(params.clone()))),
+        );
         self.retry_op(
-            &format!("ledger.stamp effectuation_params (trial {trial_number})"),
-            || {
-                self.ledger.stamp(
-                    trial_number,
-                    "effectuation_params",
-                    Value::String(py_dumps(&Value::Object(params.clone()))),
-                )
-            },
+            &format!("ledger.results flush (trial {trial_number})"),
+            || self.ledger.stamps(trial_number, &results_stamps),
         )
         .map_err(|e| e.to_string())?;
         self.publish_standing_params(&params);
@@ -2812,12 +2838,9 @@ impl<K: Coordinator> Worker<K> {
         self.metrics.observe_trial_duration(trial_duration);
         self.metrics.inc_effectuation("success");
 
-        if let Ok(Some(best)) = self.ledger.best_trial(self.dials.objective_minimizes()) {
-            if best.number == trial_number {
-                self.metrics
-                    .set_best_value(values.first().copied().flatten().unwrap_or(0.0));
-            }
-        }
+        // (the per-success best-trial read moved to the 5-trial block —
+        // it fed only the display gauge; the run epilogue still logs
+        // the final best)
         self.handle_successful_trial(&params);
         Ok(())
     }
@@ -3255,6 +3278,7 @@ mod tests {
             }),
             push_transport: Arc::new(NoopPush),
             remote_db: Arc::new(|_url: &str| Err(DbError::new("no remote db in unit tests"))),
+            shared_pool: None,
             sleeper: Arc::new(|_s: f64| {}),
         };
         Worker::with_coordinator(config, deps, ledger, coord).unwrap()
@@ -3590,6 +3614,7 @@ mod tests {
             }),
             push_transport: Arc::new(NoopPush),
             remote_db: Arc::new(|_u: &str| Err(DbError::new("down"))),
+            shared_pool: None,
             sleeper: Arc::new(|_s: f64| {}),
         };
         let err = match Worker::<FakeCoord>::with_coordinator(
