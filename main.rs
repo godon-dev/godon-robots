@@ -6,6 +6,7 @@
 
 use std::io::Read;
 
+mod inline_verbs;
 mod invocation;
 mod otel_logging;
 mod router;
