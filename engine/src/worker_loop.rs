@@ -2754,7 +2754,10 @@ impl<K: Coordinator> Worker<K> {
         // re-pricing the coarse bracket around the parked dial.
         // Bounded by the override's own exhaustion: levels spent ->
         // walk finishes -> the watch re-arms on the moved base.
-        if self.wish.is_none() && self.last_walk_complete {
+        // (the hold-mode guard keeps the watch out of its own re-walk:
+        // push trials swing the reading by design, and a swing is not
+        // world drift — only resting readings are watch samples)
+        if self.wish.is_none() && self.last_walk_complete && detection_mode == "hold" {
             if let Some(v) = values.first().copied().flatten() {
                 let (new_base, drift) = watch_sample(self.watch_base, v, self.watch_drift_band);
                 self.watch_base = Some(new_base);
