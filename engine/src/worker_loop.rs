@@ -584,6 +584,17 @@ pub struct Worker<K: Coordinator> {
     pub rollback_enabled: bool,
     pub heartbeat_interval_secs: f64,
     last_room_heartbeat: Option<Instant>,
+    /// The standing watch (holder ruling, 2026-10-31): the finished
+    /// walk's resting reading (adopted on the first watch sample) and
+    /// its knobs. Drift beyond the band is the watch's event.
+    pub watch_base: Option<f64>,
+    pub watch_interval_secs: f64,
+    pub watch_drift_band: f64,
+    /// The iteration's cached walk-complete verdict (read once in
+    /// worker_should_continue; the watch and its pacing reuse the
+    /// cache — one coordinator read per iteration, the budget the
+    /// fakes were built on).
+    pub last_walk_complete: bool,
 
     // wish state (steer mode)
     pub wish: Option<HeldWish>,
@@ -660,6 +671,17 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(10.0);
 
+        // The standing watch's knobs: the sample cadence and the drift
+        // band (default the wish band's own convention, ±0.05).
+        let watch_interval_secs = std::env::var("GODON_WATCH_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(10.0);
+        let watch_drift_band = std::env::var("GODON_WATCH_DRIFT_BAND")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.05);
+
         let push_transport = deps.push_transport.clone();
         let systemtender_id = cfg.systemtender_uuid.clone();
         let worker_id = cfg.worker_id();
@@ -691,6 +713,10 @@ impl<K: Coordinator> Worker<K> {
             rollback_enabled,
             heartbeat_interval_secs,
             last_room_heartbeat: None,
+            watch_base: None,
+            watch_interval_secs,
+            watch_drift_band,
+            last_walk_complete: false,
             wish: None,
             seek_driver: None,
             seek_open: None,
@@ -2211,6 +2237,7 @@ impl<K: Coordinator> Worker<K> {
             Ok(v) => v,
             Err(e) => return Err(e.to_string()),
         };
+        self.last_walk_complete = walk_complete;
         let pin_current = self
             .pin_receipt
             .as_deref()
@@ -2370,6 +2397,14 @@ impl<K: Coordinator> Worker<K> {
                             self.metrics.set_best_value(best.value.unwrap_or(0.0));
                         }
                         let _ = self.metrics.push();
+                    }
+                    // The standing watch paces itself: a finished walk
+                    // with no wish parks between samples instead of
+                    // spinning park trials (the beat thread and the
+                    // room heartbeat are untouched — they keep their
+                    // own cadences through this sleep).
+                    if self.wish.is_none() && self.last_walk_complete {
+                        (self.sleeper)(self.watch_interval_secs);
                     }
                 }
             }
@@ -2709,6 +2744,26 @@ impl<K: Coordinator> Worker<K> {
         if !missing.is_empty() {
             log::info!("Trial {trial_number} has None values for objectives: {missing:?}");
         }
+
+        // The standing watch (holder ruling, 2026-10-31): a finished
+        // walk with no wish parks and samples — the tender is the
+        // estate's only looker. Drift off the resting reading is the
+        // watch's event. Wording is deliberately NOT the gavel's
+        // "WALK RE-OPENED" — that receipt stays the gavel's own until
+        // the drift re-open rides the override machinery.
+        if self.wish.is_none() && self.last_walk_complete {
+            if let Some(v) = values.first().copied().flatten() {
+                let (new_base, drift) = watch_sample(self.watch_base, v, self.watch_drift_band);
+                self.watch_base = Some(new_base);
+                if let Some(d) = drift {
+                    log::info!(
+                        "WATCH DRIFT: the world moved off the finished map \
+                         ({d:.4} > band {:.4}) at trial {trial_number}",
+                        self.watch_drift_band
+                    );
+                }
+            }
+        }
         // The results flush: the noise readout and the effectuation
         // params, ONE transaction (was two). `complete` stays its own
         // transaction at its own place — the rung-7 guard's order.
@@ -2884,6 +2939,26 @@ pub fn beat_with_burst_fn(
     }
 }
 
+/// The watch sample, pure: (base, value, band) → (new base, drift).
+/// A None base adopts the reading (the finished map's resting point);
+/// a value beyond the band alerts and re-bases — each drift episode
+/// speaks once, then the watch minds the moved world. Quiet readings
+/// never move the base (slow creep accumulates to the band, it does
+/// not reset the ruler).
+pub fn watch_sample(base: Option<f64>, value: f64, band: f64) -> (f64, Option<f64>) {
+    match base {
+        None => (value, None),
+        Some(b) => {
+            let delta = (value - b).abs();
+            if delta > band {
+                (value, Some(delta))
+            } else {
+                (b, None)
+            }
+        }
+    }
+}
+
 /// One beat into the tender's own state row, its own throwaway
 /// connection. Rollout-order independent: a state row born before the
 /// interval column gets it added, then beats normally. Message-matched
@@ -2953,12 +3028,21 @@ mod tests {
         // read-failure injection (rung 8's degradation tests)
         state_get_err: Option<String>,
         wish_latest_err: Option<String>,
+        // bounded-run staging (the standing-watch world, 2026-10-31):
+        // finished walkers no longer leave, so a test's run ends by
+        // the controller's stop — modeled as "stop after N outcomes"
+        stop_after: Option<usize>,
     }
 
     #[derive(Clone)]
     struct FakeLedger(Arc<Mutex<GState>>);
 
     impl FakeLedger {
+        fn stop_after(&self, n: usize) -> Self {
+            self.0.lock().unwrap().stop_after = Some(n);
+            self.clone()
+        }
+
         fn new() -> Self {
             FakeLedger(Arc::new(Mutex::new(GState {
                 trials: Vec::new(),
@@ -2974,6 +3058,7 @@ mod tests {
                 removed_wishes: Vec::new(),
                 state_get_err: None,
                 wish_latest_err: None,
+                stop_after: None,
             })))
         }
         fn set_wish(&self, w: Option<(String, String)>) {
@@ -3074,7 +3159,11 @@ mod tests {
             Ok(g.best.clone())
         }
         fn stop_requested(&self) -> Result<bool, DbError> {
-            Ok(self.0.lock().unwrap().stop)
+            let g = self.0.lock().unwrap();
+            Ok(g.stop
+                || g.stop_after
+                    .map(|n| g.completes.len() + g.fails.len() >= n)
+                    .unwrap_or(false))
         }
         fn wish_latest(&self) -> Result<Option<(String, String)>, DbError> {
             let g = self.0.lock().unwrap();
@@ -3298,6 +3387,34 @@ mod tests {
     }
 
     // ─── TestExecuteTrial ───
+
+    #[test]
+    fn watch_sample_adopts_then_alerts_once_per_episode() {
+        // The standing watch's pure sample (holder ruling, 2026-10-31):
+        // first reading adopts the resting base; quiet stays quiet;
+        // beyond-band alerts ONCE and re-bases; slow creep accumulates
+        // to the band instead of resetting the ruler.
+        let (b1, none) = super::watch_sample(None, 0.80, 0.05);
+        assert_eq!(b1, 0.80);
+        assert!(none.is_none());
+        // quiet: base unmoved, no alert
+        let (b2, none) = super::watch_sample(Some(b1), 0.83, 0.05);
+        assert_eq!(b2, 0.80);
+        assert!(none.is_none());
+        // drift beyond band: alerts, re-bases on the moved world
+        let (b3, drift) = super::watch_sample(Some(b2), 0.92, 0.05);
+        assert_eq!(b3, 0.92);
+        assert!((drift.unwrap() - 0.12).abs() < 1e-9);
+        // the moved world is the new quiet
+        let (_, none) = super::watch_sample(Some(b3), 0.93, 0.05);
+        assert!(none.is_none());
+        // creep: +0.02 twice crosses the band on the second step —
+        // accumulated, not forgiven
+        let (c1, _) = super::watch_sample(Some(0.80), 0.82, 0.05);
+        assert_eq!(c1, 0.80);
+        let (_, creep) = super::watch_sample(Some(c1), 0.86, 0.05);
+        assert!(creep.is_some(), "creep accumulates to the band");
+    }
 
     #[test]
     fn execute_trial_success_returns_metrics() {
@@ -3665,7 +3782,7 @@ mod tests {
 
     #[test]
     fn run_executes_single_trial_then_walk_completes() {
-        let ledger = Arc::new(FakeLedger::new());
+        let ledger = Arc::new(FakeLedger::new().stop_after(1));
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed", "successful_changes": 1})),
@@ -3686,7 +3803,7 @@ mod tests {
 
     #[test]
     fn run_marks_trial_failed_on_guardrail_violation() {
-        let ledger = Arc::new(FakeLedger::new());
+        let ledger = Arc::new(FakeLedger::new().stop_after(1));
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         let wmill = FakeWmill::new(vec![
             Ok(json!({"status": "completed", "successful_changes": 1})),
@@ -3706,7 +3823,7 @@ mod tests {
 
     #[test]
     fn run_handles_trial_exception() {
-        let ledger = Arc::new(FakeLedger::new());
+        let ledger = Arc::new(FakeLedger::new().stop_after(1));
         let coord = FakeCoord::new(vec![impulse_decision()], vec![false, true]);
         // wmill dark: effectuation error → inf metrics → still completes.
         // Force the loud path instead: total effectuation failure raises.
@@ -3729,7 +3846,7 @@ mod tests {
 
     #[test]
     fn run_pushes_metrics_on_completion() {
-        let ledger = Arc::new(FakeLedger::new());
+        let ledger = Arc::new(FakeLedger::new().stop_after(1));
         let coord = FakeCoord::new(vec![], vec![true]); // walk already complete
         let wmill = FakeWmill::new(vec![]);
         let mut w = make_worker(
