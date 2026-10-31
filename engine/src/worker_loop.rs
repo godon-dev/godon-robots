@@ -2748,19 +2748,58 @@ impl<K: Coordinator> Worker<K> {
         // The standing watch (holder ruling, 2026-10-31): a finished
         // walk with no wish parks and samples — the tender is the
         // estate's only looker. Drift off the resting reading is the
-        // watch's event. Wording is deliberately NOT the gavel's
-        // "WALK RE-OPENED" — that receipt stays the gavel's own until
-        // the drift re-open rides the override machinery.
+        // watch's event, and its commission (ruled the same night):
+        // the tender re-opens its own walk through the gavel family's
+        // probe override — the sanctioned re-open for finished walks —
+        // re-pricing the coarse bracket around the parked dial.
+        // Bounded by the override's own exhaustion: levels spent ->
+        // walk finishes -> the watch re-arms on the moved base.
         if self.wish.is_none() && self.last_walk_complete {
             if let Some(v) = values.first().copied().flatten() {
                 let (new_base, drift) = watch_sample(self.watch_base, v, self.watch_drift_band);
                 self.watch_base = Some(new_base);
                 if let Some(d) = drift {
-                    log::info!(
-                        "WATCH DRIFT: the world moved off the finished map \
-                         ({d:.4} > band {:.4}) at trial {trial_number}",
-                        self.watch_drift_band
-                    );
+                    let dial = params
+                        .iter()
+                        .find(|(_, val)| val.as_f64().is_some())
+                        .map(|(k, val)| (k.clone(), val.as_f64().unwrap_or_default()));
+                    match dial {
+                        Some((name, setting)) => {
+                            let (lo, hi, step) = dial_grid(&self.config, &name);
+                            let mut levels: Vec<f64> = [setting - step, setting, setting + step]
+                                .into_iter()
+                                .filter(|l| *l >= lo && *l <= hi)
+                                .collect();
+                            levels.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            levels.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+                            if !levels.is_empty() {
+                                self.coordinator.set_probe_override(&name, &levels);
+                                log::info!(
+                                    "WATCH DRIFT: the world moved off the finished map \
+                                     ({d:.4} > band {:.4}) at trial {trial_number} — walk \
+                                     re-opened around {name} at {levels:?}",
+                                    self.watch_drift_band
+                                );
+                            } else {
+                                log::info!(
+                                    "WATCH DRIFT: the world moved off the finished map \
+                                     ({d:.4} > band {:.4}) at trial {trial_number} — no \
+                                     admissible levels for {name}, watch re-based only",
+                                    self.watch_drift_band
+                                );
+                            }
+                        }
+                        None => {
+                            log::info!(
+                                "WATCH DRIFT: the world moved off the finished map \
+                                 ({d:.4} > band {:.4}) at trial {trial_number} — no dial \
+                                 named in this trial's params, watch re-based only",
+                                self.watch_drift_band
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2957,6 +2996,28 @@ pub fn watch_sample(base: Option<f64>, value: f64, band: f64) -> (f64, Option<f6
             }
         }
     }
+}
+
+/// The dial's coarse grid from its config constraints — (lower,
+/// upper, step), defaults 0/100/25 when the config is silent (the
+/// strain's own convention). The watch's re-open bracket reads its
+/// span from here.
+fn dial_grid(config: &Value, param: &str) -> (f64, f64, f64) {
+    config
+        .get("settings")
+        .and_then(|s| s.get("generic"))
+        .and_then(|g| g.get(param))
+        .and_then(|p| p.get("constraints"))
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .map(|c| {
+            (
+                c.get("lower").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                c.get("upper").and_then(|v| v.as_f64()).unwrap_or(100.0),
+                c.get("step").and_then(|v| v.as_f64()).unwrap_or(25.0),
+            )
+        })
+        .unwrap_or((0.0, 100.0, 25.0))
 }
 
 /// One beat into the tender's own state row, its own throwaway
@@ -3414,6 +3475,49 @@ mod tests {
         assert_eq!(c1, 0.80);
         let (_, creep) = super::watch_sample(Some(c1), 0.86, 0.05);
         assert!(creep.is_some(), "creep accumulates to the band");
+    }
+
+    fn park_at_50() -> Decision {
+        Decision {
+            mode: "hold",
+            params: Some(Map::from_iter([("param_0".to_string(), json!(50.0))])),
+            impulse_phase: None,
+            probe_param: None,
+            probe_param_idx: None,
+            probe_level: None,
+            lease_phase: None,
+            detection_trial: false,
+            ambience_probe: false,
+        }
+    }
+
+    #[test]
+    fn watch_drift_reopens_the_walk_through_the_override() {
+        // The watch's commission (ruled 2026-10-31 midnight): drift off
+        // the resting reading under a finished, wishless walk plants
+        // the probe override — the gavel family's sanctioned re-open —
+        // around the parked dial's coarse bracket. First reading
+        // adopts the base; the second drifts 0.12 past a 0.05 band.
+        let ledger = Arc::new(FakeLedger::new().stop_after(2));
+        let coord = FakeCoord::new(vec![park_at_50(), park_at_50()], vec![true, true]);
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.80}})),
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.92}})),
+        ]);
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            coord.clone(),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.run().unwrap();
+        let ov = coord.overrides.lock().unwrap();
+        assert_eq!(ov.len(), 1, "drift must plant exactly one override: {ov:?}");
+        assert_eq!(ov[0].0, "param_0");
+        assert_eq!(ov[0].1, vec![25.0, 50.0, 75.0]);
     }
 
     #[test]
