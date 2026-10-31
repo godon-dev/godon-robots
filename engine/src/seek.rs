@@ -605,6 +605,55 @@ mod tests {
         assert_eq!(best.params["a"], json!(1));
     }
 
+    // An equal reading is not a promotion: the fold's strict > and <
+    // keep whichever finding arrived first. Ties must not pass the
+    // crown to a later candidate with the same number.
+    #[test]
+    fn maximize_keeps_the_first_of_equal_readings() {
+        let findings = vec![
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(1))]),
+                reading: 0.7,
+                bars: 0.02,
+            },
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(2))]),
+                reading: 0.7,
+                bars: 0.02,
+            },
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(3))]),
+                reading: 0.1,
+                bars: 0.02,
+            },
+        ];
+        let best = rank(&findings, MAXIMIZE).unwrap();
+        assert_eq!(best.params["a"], json!(1));
+    }
+
+    #[test]
+    fn minimize_keeps_the_first_of_equal_readings() {
+        let findings = vec![
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(1))]),
+                reading: 0.4,
+                bars: 0.02,
+            },
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(2))]),
+                reading: 0.4,
+                bars: 0.02,
+            },
+            Finding {
+                params: serde_json::Map::from_iter([("a".into(), json!(3))]),
+                reading: 0.9,
+                bars: 0.02,
+            },
+        ];
+        let best = rank(&findings, MINIMIZE).unwrap();
+        assert_eq!(best.params["a"], json!(1));
+    }
+
     #[test]
     fn no_findings_ranks_none() {
         assert!(rank(&[], MAXIMIZE).is_none());
