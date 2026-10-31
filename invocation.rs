@@ -26,8 +26,11 @@ use serde_json::{json, Value};
 use godon_engine::ledger::TrialLedger;
 use godon_engine::worker_loop::{Wmill, Worker, WorkerDeps};
 
+use crate::inline_verbs::InlineVerbs;
+
 /// The component dependencies — everything [`main.rs`] builds from
 /// env, and everything the tests fake.
+#[derive(Clone)]
 pub struct ComponentDeps {
     pub wmill: Arc<dyn Wmill>,
     pub recon_http: Arc<dyn godon_recon::http::ReconHttp>,
@@ -199,7 +202,12 @@ fn run_worker(args: &Value, deps: &ComponentDeps) -> Result<Value, String> {
     let dsn = format!("postgresql://{user}:{pw}@{host}:{port}/{tender_db}");
 
     let ledger = Arc::new(TrialLedger::new_pooled(&dsn).map_err(|e| e.to_string())?);
-    let worker_deps = WorkerDeps::production(deps.wmill.clone(), &tender_db);
+    // MAKESHIFT (2026-10-31): the two HTTP verbs internalised into the
+    // tender's body — see inline_verbs.rs for the banner and the
+    // revisal triggers. ssh/preflights/state ride the windmill rail;
+    // GODON_VERB_RAIL=wmill flips the whole thing back.
+    let verb_rail: Arc<dyn Wmill> = Arc::new(InlineVerbs::new(deps.wmill.clone(), deps.clone()));
+    let worker_deps = WorkerDeps::production(verb_rail, &tender_db);
     type ProductionCoordinator = godon_engine::coordinator::ProbeCoordinator<
         Arc<dyn godon_engine::ledger::Connect + Send + Sync>,
     >;
