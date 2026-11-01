@@ -1970,15 +1970,6 @@ impl<K: Coordinator> Worker<K> {
             }
         });
         let coord = &self.coordinator;
-        // The receipt's condition, read BEFORE the mutable borrow (the
-        // mine-filter pattern). Room 19 (2026-11-01): the sender armed
-        // the aimed hint from deep in serve, so the coordinator's own
-        // WALK RE-OPENED line — which fires only from the idle branch
-        // — never spoke. The arming site is the receipt's home: the
-        // arm that re-opens a COMPLETE walk is the re-open; arms under
-        // an already-walking tender are ordinary remeasure steps and
-        // stay silent.
-        let walk_complete = self.last_walk_complete;
         if let Some(w) = self.wish.as_mut() {
             for (p, s) in mine {
                 if w.moves.get(&p) != Some(&s) {
@@ -1991,9 +1982,21 @@ impl<K: Coordinator> Worker<K> {
                 }
             }
             if let Some((param, level)) = probe {
+                // The receipt fires on every NEW hint (param or level
+                // changed since the last refresh — the cursor's step),
+                // not on every refresh: the plan page repeats the same
+                // level between cursor steps. Room 20 (2026-11-01):
+                // gating on last_walk_complete never held — the walk
+                // notebook reads incomplete at the arming instant on
+                // both consumers (the door's finished STAMP and the
+                // worker's char_complete() VERDICT are different
+                // truths), so the gate starved the line in the live
+                // room shape. The arming itself is the receipt.
+                let prev = w.probe.clone();
+                let changed = prev.as_ref() != Some(&(param.clone(), level));
                 w.probe = Some((param.clone(), level));
                 coord.set_probe_override(&param, &[level]);
-                if walk_complete {
+                if changed {
                     log::info!(
                         "WALK RE-OPENED: the aimed hint armed ({param} @ {level:?}) — the walk re-opens"
                     );
@@ -3553,13 +3556,15 @@ mod tests {
     }
 
     #[test]
-    fn aimed_hint_arming_logs_the_walk_reopen_only_under_a_complete_walk() {
+    fn aimed_hint_arming_logs_the_walk_reopen_on_new_hints_only() {
         // Room 19 (2026-11-01): the aimed hint armed while the sender
         // was deep in serve, so the coordinator's idle-branch WALK
-        // RE-OPENED line never fired. The arming site is now the
-        // receipt's home: the arm that re-opens a COMPLETE walk logs
-        // WALK RE-OPENED; arms under an already-walking tender are
-        // ordinary remeasure steps and stay silent.
+        // RE-OPENED line never fired. Room 20 (same day): gating the
+        // arming-site receipt on last_walk_complete starved it too —
+        // the walk notebook reads incomplete at the arming instant on
+        // both consumers. The arming itself is the receipt: every NEW
+        // hint (param or level changed) logs; the same hint repeating
+        // between cursor steps stays deduped.
         let _ = log::set_logger(&ARMING_CAPTURE);
         // The facade ships with max level Off; without raising it no
         // record ever reaches the installed logger.
@@ -3577,7 +3582,8 @@ mod tests {
         let arming_line =
             "WALK RE-OPENED: the aimed hint armed (param_0 @ 0.0) — the walk re-opens";
 
-        // The complete-walk arming: the receipt fires, the override arms.
+        // First arming on a complete walk: the receipt fires, the
+        // override arms.
         let ledger = Arc::new(FakeLedger::new().stop_after(1));
         ledger.set_wish(Some(("w-arm".to_string(), "sender".to_string())));
         let coord = FakeCoord::new(vec![park_at_50()], vec![true]);
@@ -3598,6 +3604,7 @@ mod tests {
         assert_eq!(ov.len(), 1, "the hint must arm the override: {ov:?}");
         assert_eq!(ov[0].0, "param_0");
         assert_eq!(ov[0].1, vec![0.0]);
+        drop(ov);
         let appended: Vec<String> = ARMING_LOGS
             .lock()
             .unwrap()
@@ -3605,16 +3612,22 @@ mod tests {
             .skip(before)
             .cloned()
             .collect();
-        assert!(
-            appended.iter().any(|l| l == arming_line),
-            "arming under a complete walk must log the receipt: {appended:?}"
+        assert_eq!(
+            appended.iter().filter(|l| *l == arming_line).count(),
+            1,
+            "the first hint must log exactly once: {appended:?}"
         );
 
-        // The already-walking arming: ordinary remeasure, silent.
-        let ledger2 = Arc::new(FakeLedger::new().stop_after(1));
+        // Second refresh, same hint: no adoption (one trial), so the
+        // dedup proof is the arming-side state — feed the same page to
+        // a fresh worker twice via two trials; the second refresh sees
+        // the same (param, level) and must NOT log again.
+        let ledger2 = Arc::new(FakeLedger::new().stop_after(2));
         ledger2.set_wish(Some(("w-arm".to_string(), "sender".to_string())));
-        let coord2 = FakeCoord::new(vec![park_at_50()], vec![false]);
+        let coord2 = FakeCoord::new(vec![park_at_50(), park_at_50()], vec![false, false]);
         let wmill2 = FakeWmill::new(vec![
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.8}})),
             Ok(json!({"status": "completed", "successful_changes": 1})),
             Ok(json!({"status": "completed", "metrics": {"throughput": 0.8}})),
         ]);
@@ -3629,8 +3642,8 @@ mod tests {
         w2.run().unwrap();
         assert_eq!(
             coord2.overrides.lock().unwrap().len(),
-            1,
-            "the hint still arms under a walking tender"
+            2,
+            "the hint re-arms per refresh (the override refreshes); the LOG dedups"
         );
         let appended2: Vec<String> = ARMING_LOGS
             .lock()
@@ -3639,9 +3652,10 @@ mod tests {
             .skip(before2)
             .cloned()
             .collect();
-        assert!(
-            !appended2.iter().any(|l| l.contains("aimed hint armed")),
-            "arming under a walking tender must stay silent: {appended2:?}"
+        assert_eq!(
+            appended2.iter().filter(|l| *l == arming_line).count(),
+            1,
+            "the repeating hint must log once across refreshes (walking tender included): {appended2:?}"
         );
     }
 
