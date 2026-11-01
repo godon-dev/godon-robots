@@ -1970,6 +1970,15 @@ impl<K: Coordinator> Worker<K> {
             }
         });
         let coord = &self.coordinator;
+        // The receipt's condition, read BEFORE the mutable borrow (the
+        // mine-filter pattern). Room 19 (2026-11-01): the sender armed
+        // the aimed hint from deep in serve, so the coordinator's own
+        // WALK RE-OPENED line — which fires only from the idle branch
+        // — never spoke. The arming site is the receipt's home: the
+        // arm that re-opens a COMPLETE walk is the re-open; arms under
+        // an already-walking tender are ordinary remeasure steps and
+        // stay silent.
+        let walk_complete = self.last_walk_complete;
         if let Some(w) = self.wish.as_mut() {
             for (p, s) in mine {
                 if w.moves.get(&p) != Some(&s) {
@@ -1984,6 +1993,11 @@ impl<K: Coordinator> Worker<K> {
             if let Some((param, level)) = probe {
                 w.probe = Some((param.clone(), level));
                 coord.set_probe_override(&param, &[level]);
+                if walk_complete {
+                    log::info!(
+                        "WALK RE-OPENED: the aimed hint armed ({param} @ {level:?}) — the walk re-opens"
+                    );
+                }
             }
         }
     }
@@ -3521,6 +3535,114 @@ mod tests {
         assert_eq!(ov.len(), 1, "drift must plant exactly one override: {ov:?}");
         assert_eq!(ov[0].0, "param_0");
         assert_eq!(ov[0].1, vec![25.0, 50.0, 75.0]);
+    }
+
+    // ─── the arming receipt (room 19's wording gap, 2026-11-01) ───
+
+    static ARMING_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    struct ArmingCaptureLog;
+    static ARMING_CAPTURE: ArmingCaptureLog = ArmingCaptureLog;
+    impl log::Log for ArmingCaptureLog {
+        fn enabled(&self, _m: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, r: &log::Record) {
+            ARMING_LOGS.lock().unwrap().push(r.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+
+    #[test]
+    fn aimed_hint_arming_logs_the_walk_reopen_only_under_a_complete_walk() {
+        // Room 19 (2026-11-01): the aimed hint armed while the sender
+        // was deep in serve, so the coordinator's idle-branch WALK
+        // RE-OPENED line never fired. The arming site is now the
+        // receipt's home: the arm that re-opens a COMPLETE walk logs
+        // WALK RE-OPENED; arms under an already-walking tender are
+        // ordinary remeasure steps and stay silent.
+        let _ = log::set_logger(&ARMING_CAPTURE);
+        // The facade ships with max level Off; without raising it no
+        // record ever reaches the installed logger.
+        log::set_max_level(log::LevelFilter::Info);
+        let base = "http://godon-godon-causal:9091/steer/plan";
+        let mut pages = BTreeMap::new();
+        pages.insert(
+            format!("{base}/w-arm"),
+            json!({
+                "instruction": "hold",
+                "plan": {"moves": [{"param": "param_0", "setting": 50.0}]},
+                "probe": {"param": "param_0", "level": 0.0},
+            }),
+        );
+        let arming_line =
+            "WALK RE-OPENED: the aimed hint armed (param_0 @ 0.0) — the walk re-opens";
+
+        // The complete-walk arming: the receipt fires, the override arms.
+        let ledger = Arc::new(FakeLedger::new().stop_after(1));
+        ledger.set_wish(Some(("w-arm".to_string(), "sender".to_string())));
+        let coord = FakeCoord::new(vec![park_at_50()], vec![true]);
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.8}})),
+        ]);
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            coord.clone(),
+            wmill,
+            pages.clone(),
+        );
+        let before = ARMING_LOGS.lock().unwrap().len();
+        w.run().unwrap();
+        let ov = coord.overrides.lock().unwrap();
+        assert_eq!(ov.len(), 1, "the hint must arm the override: {ov:?}");
+        assert_eq!(ov[0].0, "param_0");
+        assert_eq!(ov[0].1, vec![0.0]);
+        let appended: Vec<String> = ARMING_LOGS
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(before)
+            .cloned()
+            .collect();
+        assert!(
+            appended.iter().any(|l| l == arming_line),
+            "arming under a complete walk must log the receipt: {appended:?}"
+        );
+
+        // The already-walking arming: ordinary remeasure, silent.
+        let ledger2 = Arc::new(FakeLedger::new().stop_after(1));
+        ledger2.set_wish(Some(("w-arm".to_string(), "sender".to_string())));
+        let coord2 = FakeCoord::new(vec![park_at_50()], vec![false]);
+        let wmill2 = FakeWmill::new(vec![
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.8}})),
+        ]);
+        let mut w2 = make_worker(
+            base_config(json!({})),
+            ledger2,
+            coord2.clone(),
+            wmill2,
+            pages,
+        );
+        let before2 = ARMING_LOGS.lock().unwrap().len();
+        w2.run().unwrap();
+        assert_eq!(
+            coord2.overrides.lock().unwrap().len(),
+            1,
+            "the hint still arms under a walking tender"
+        );
+        let appended2: Vec<String> = ARMING_LOGS
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(before2)
+            .cloned()
+            .collect();
+        assert!(
+            !appended2.iter().any(|l| l.contains("aimed hint armed")),
+            "arming under a walking tender must stay silent: {appended2:?}"
+        );
     }
 
     #[test]
