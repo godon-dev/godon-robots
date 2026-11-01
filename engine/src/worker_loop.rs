@@ -2415,12 +2415,21 @@ impl<K: Coordinator> Worker<K> {
                         }
                         let _ = self.metrics.push();
                     }
-                    // The standing watch paces itself: a finished walk
-                    // with no wish parks between samples instead of
-                    // spinning park trials (the beat thread and the
-                    // room heartbeat are untouched — they keep their
-                    // own cadences through this sleep).
-                    if self.wish.is_none() && self.last_walk_complete {
+                    // The standing watch paces itself: a parked tender
+                    // (wishless, coordinator idle) sleeps between
+                    // samples instead of spinning park trials (the
+                    // beat thread and the room heartbeat are untouched
+                    // — they keep their own cadences through this
+                    // sleep). godon#431 (2026-11-01): the gate was
+                    // last_walk_complete, which reads FALSE on the
+                    // estate's parked tenders (the walk notebook's
+                    // verdict and the coordinator's idle state are
+                    // different truths) — the pacing never ran, parked
+                    // tenders spun at ~4 trials/s, and the watch never
+                    // sampled. The coordinator's OWN state is the
+                    // reliable resting verdict (COORD state=idle,
+                    // measured live).
+                    if self.wish.is_none() && self.coordinator.get_state().as_str() == "idle" {
                         (self.sleeper)(self.watch_interval_secs);
                     }
                 }
@@ -2774,7 +2783,7 @@ impl<K: Coordinator> Worker<K> {
         // (the hold-mode guard keeps the watch out of its own re-walk:
         // push trials swing the reading by design, and a swing is not
         // world drift — only resting readings are watch samples)
-        if self.wish.is_none() && self.last_walk_complete && detection_mode == "hold" {
+        if self.wish.is_none() && coord_state.as_str() == "idle" && detection_mode == "hold" {
             if let Some(v) = values.first().copied().flatten() {
                 let (new_base, drift) = watch_sample(self.watch_base, v, self.watch_drift_band);
                 self.watch_base = Some(new_base);
@@ -3536,6 +3545,44 @@ mod tests {
         w.run().unwrap();
         let ov = coord.overrides.lock().unwrap();
         assert_eq!(ov.len(), 1, "drift must plant exactly one override: {ov:?}");
+        assert_eq!(ov[0].0, "param_0");
+        assert_eq!(ov[0].1, vec![25.0, 50.0, 75.0]);
+    }
+
+    #[test]
+    fn watch_samples_even_when_the_walk_notebook_reads_incomplete() {
+        // godon#431 (2026-11-01, measured live): the watch gates were
+        // keyed on last_walk_complete — char_complete()'s verdict —
+        // which reads FALSE on the estate's parked tenders (the
+        // coordinator sits in its own Idle state; the walk notebook's
+        // completion verdict and the coordinator's state are different
+        // truths). The watch never sampled: a live watcher with its
+        // reading three times past the band stayed silent. The gates
+        // now key on the coordinator's idle state — this test IS the
+        // live shape: char_complete false throughout, coordinator
+        // idle, drift decisive → the override must plant.
+        let ledger = Arc::new(FakeLedger::new().stop_after(2));
+        let coord = FakeCoord::new(vec![park_at_50(), park_at_50()], vec![false, false]);
+        let wmill = FakeWmill::new(vec![
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.80}})),
+            Ok(json!({"status": "completed", "successful_changes": 1})),
+            Ok(json!({"status": "completed", "metrics": {"throughput": 0.92}})),
+        ]);
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            coord.clone(),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.run().unwrap();
+        let ov = coord.overrides.lock().unwrap();
+        assert_eq!(
+            ov.len(),
+            1,
+            "the watch must sample on the coordinator's idle verdict, not the notebook's: {ov:?}"
+        );
         assert_eq!(ov[0].0, "param_0");
         assert_eq!(ov[0].1, vec![25.0, 50.0, 75.0]);
     }
