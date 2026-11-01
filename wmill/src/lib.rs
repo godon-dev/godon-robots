@@ -260,6 +260,36 @@ pub struct ReqwestWmillHttp {
 }
 
 impl ReqwestWmillHttp {
+    /// Transport-level send retries. Measured live 2026-11-01
+    /// (godon#432): one failed set_state POST — "error sending request"
+    /// against the worker's internal API — propagated up through
+    /// run_trials and ended whole tenders mid-room (the beat froze with
+    /// the process; judges and watches starved silently). A blip is
+    /// transport noise; only persistent failure is fatal. HTTP status
+    /// errors are NOT retried here — check() owns their semantics.
+    const SEND_ATTEMPTS: usize = 3;
+    const RETRY_DELAYS_MS: [u64; 2] = [250, 750];
+
+    fn send_retried(
+        &self,
+        build: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let mut attempt = 0usize;
+        loop {
+            match build(&self.client).send() {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    if attempt + 1 >= Self::SEND_ATTEMPTS {
+                        return Err(e.to_string());
+                    }
+                    let delay = Self::RETRY_DELAYS_MS.get(attempt).copied().unwrap_or(1000);
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(delay));
+                }
+            }
+        }
+    }
+
     /// `BASE_INTERNAL_URL` (the platform's internal url) wins over
     /// `WM_BASE_URL`, exactly as the python constructor ordered it.
     pub fn from_env() -> Result<Self, String> {
@@ -283,16 +313,18 @@ impl ReqwestWmillHttp {
 
 impl WmillHttp for ReqwestWmillHttp {
     fn get(&self, path: &str, query: &[(&str, String)]) -> Result<WmillResp, String> {
-        let mut req = self
-            .client
-            .get(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json");
-        if !query.is_empty() {
-            let pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            req = req.query(&pairs);
-        }
-        let resp = req.send().map_err(|e| e.to_string())?;
+        let resp = self.send_retried(|c| {
+            let mut req = c
+                .get(format!("{}{}", self.base, path))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Content-Type", "application/json");
+            if !query.is_empty() {
+                let pairs: Vec<(&str, &str)> =
+                    query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                req = req.query(&pairs);
+            }
+            req
+        })?;
         Ok(WmillResp {
             status: resp.status().as_u16(),
             text: resp.text().map_err(|e| e.to_string())?,
@@ -305,17 +337,19 @@ impl WmillHttp for ReqwestWmillHttp {
         query: &[(&str, String)],
         body: &Value,
     ) -> Result<WmillResp, String> {
-        let mut req = self
-            .client
-            .post(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
-            .json(body);
-        if !query.is_empty() {
-            let pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            req = req.query(&pairs);
-        }
-        let resp = req.send().map_err(|e| e.to_string())?;
+        let resp = self.send_retried(|c| {
+            let mut req = c
+                .post(format!("{}{}", self.base, path))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Content-Type", "application/json")
+                .json(body);
+            if !query.is_empty() {
+                let pairs: Vec<(&str, &str)> =
+                    query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                req = req.query(&pairs);
+            }
+            req
+        })?;
         Ok(WmillResp {
             status: resp.status().as_u16(),
             text: resp.text().map_err(|e| e.to_string())?,
@@ -327,6 +361,80 @@ impl WmillHttp for ReqwestWmillHttp {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    // ─── transport retries (godon#432: one send blip killed tenders) ──
+
+    fn localhost_http(port: u16) -> ReqwestWmillHttp {
+        ReqwestWmillHttp {
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            base: format!("http://127.0.0.1:{port}/api"),
+            token: "test-token".to_string(),
+        }
+    }
+
+    #[test]
+    fn transport_blip_is_retried_not_fatal() {
+        // Measured live 2026-11-01 (godon#432): a single failed
+        // resources/update_value POST — "error sending request" against
+        // the worker's internal API — propagated to run() and ended
+        // whole tenders mid-room. A blip must be retried; only
+        // persistent failure is fatal.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            // first connection: the blip — accept and slam the door
+            let (s1, _) = listener.accept().unwrap();
+            drop(s1);
+            // second connection: serve one 200
+            let (mut s2, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = s2.read(&mut buf);
+            let body = r#"{"ok":true}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s2.write_all(resp.as_bytes()).unwrap();
+        });
+        let http = localhost_http(port);
+        let out = http
+            .post(
+                "/w/godon/resources/update_value/f/x",
+                &[],
+                &serde_json::json!({"value": 1}),
+            )
+            .expect("the blip must be ridden, not fatal");
+        assert_eq!(out.status, 200);
+        srv.join().unwrap();
+    }
+
+    #[test]
+    fn persistent_transport_failure_still_errors() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..ReqwestWmillHttp::SEND_ATTEMPTS {
+                let (s, _) = listener.accept().unwrap();
+                drop(s);
+            }
+        });
+        let http = localhost_http(port);
+        assert!(
+            http.post(
+                "/w/godon/resources/update_value/f/x",
+                &[],
+                &serde_json::json!({"value": 1}),
+            )
+            .is_err(),
+            "a dead API must still error after the retries are spent"
+        );
+    }
 
     #[derive(Default)]
     struct FakeHttp {
