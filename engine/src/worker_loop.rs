@@ -2500,21 +2500,7 @@ impl<K: Coordinator> Worker<K> {
                         .map_err(|e| e.to_string())?
                         .unwrap_or_default(),
                 };
-                let mut hold_params = base;
-                for (p, s) in &wish.moves {
-                    hold_params.insert(p.clone(), s.clone());
-                }
-                decision = Decision {
-                    mode: "hold",
-                    params: Some(hold_params),
-                    impulse_phase: None,
-                    probe_param: None,
-                    probe_param_idx: None,
-                    probe_level: None,
-                    lease_phase: None,
-                    detection_trial: false,
-                    ambience_probe: false,
-                };
+                decision = serve_decision(base, &wish.moves);
             } else if wish.instruction == "park" {
                 // The receiver's role: stillness — neutral dials,
                 // readings published with the hold phase.
@@ -3077,6 +3063,33 @@ pub fn beat_once(own: &dyn Connect, interval: f64) -> Result<(), DbError> {
 // binary and Yugabyte refused every publish — the ledger's
 // serde-Value + $1::jsonb pattern is the one true binding)
 
+/// The serving sender's decision: the planned values held over the
+/// walk's base. The serve IS a hold — the readings published while
+/// serving are tended readings, so the decision carries the hold
+/// phase (found live 2026-11-02, godon#434: the serve decision
+/// published lease_phase None, the judge's hold filter then skipped
+/// the sender's own rows, and terms on the sender's outcomes never
+/// judged — #399's books still carried kind:term; the acceptance
+/// spec's law is untouched: only ASSIGNED tenders serve, ambient
+/// walk rows keep their probe/idle phases).
+fn serve_decision(base: Map<String, Value>, moves: &BTreeMap<String, Value>) -> Decision {
+    let mut hold_params = base;
+    for (p, s) in moves {
+        hold_params.insert(p.clone(), s.clone());
+    }
+    Decision {
+        mode: "hold",
+        params: Some(hold_params),
+        impulse_phase: None,
+        probe_param: None,
+        probe_param_idx: None,
+        probe_level: None,
+        lease_phase: Some("hold".to_string()),
+        detection_trial: false,
+        ambience_probe: false,
+    }
+}
+
 /// Joint serving: a multi-claim plan names every sender; each tender
 /// serves its own moves and ignores the rest. The legacy single-move
 /// plan is trusted as this tender's by construction.
@@ -3095,6 +3108,30 @@ fn move_is_mine(mv: &Value, single: bool, systemtender_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── serve_decision (godon#434: the serve IS a hold) ───
+
+    #[test]
+    fn serve_decision_publishes_hold_phase() {
+        // The serving sender's readings are tended readings — the
+        // judge's hold filter must see them (terms on the sender's
+        // own outcomes judged; found live 2026-11-02).
+        let mut base = Map::new();
+        base.insert("param_0".into(), json!(50.0));
+        base.insert("param_1".into(), json!(30.0));
+        let mut moves = BTreeMap::new();
+        moves.insert("param_0".into(), json!(45.78));
+        let d = serve_decision(base, &moves);
+        assert_eq!(d.mode, "hold");
+        assert_eq!(d.lease_phase.as_deref(), Some("hold"));
+        let params = d.params.expect("serve carries merged params");
+        assert_eq!(params.get("param_0"), Some(&json!(45.78)), "the move wins");
+        assert_eq!(
+            params.get("param_1"),
+            Some(&json!(30.0)),
+            "other dials ride the base"
+        );
+    }
     use crate::coordinator_walk::Decision;
     use crate::walk_policy::HttpError;
     use serde_json::json;
