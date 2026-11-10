@@ -2068,7 +2068,16 @@ impl<K: Coordinator> Worker<K> {
             "wish": self.wish_summary(),
             "seek_spend": self.seek_spend(),
         });
-        self.wmill.set_state(&state)?;
+        // robots#303 (D2 census 2026-11-02): the 16:30 blip outlasted
+        // the transport's 3 send retries and the spent error propagated
+        // out of run() — whole tenders died mid-room (witness
+        // d36b6f9a). A periodic publish degrades like every sibling
+        // write (heartbeat, standing params, instrument stamps): log,
+        // skip, retry next refresh. The transport retries blips; only
+        // the escalation to tender death was wrong.
+        if let Err(e) = self.wmill.set_state(&state) {
+            log::warn!("state publish failed (skipped; next refresh retries): {e}");
+        }
         self.stamp_instruments(&state);
         Ok(())
     }
@@ -3380,6 +3389,7 @@ mod tests {
         args: Arc<Mutex<Vec<Value>>>,
         scripts: Arc<Mutex<VecDeque<Result<Value, String>>>>,
         states: Arc<Mutex<Vec<Value>>>,
+        state_err: Arc<Mutex<Option<String>>>,
     }
 
     impl FakeWmill {
@@ -3389,7 +3399,11 @@ mod tests {
                 args: Arc::new(Mutex::new(Vec::new())),
                 scripts: Arc::new(Mutex::new(scripts.into())),
                 states: Arc::new(Mutex::new(Vec::new())),
+                state_err: Arc::new(Mutex::new(None)),
             }
+        }
+        fn set_state_err(&self, e: Option<String>) {
+            *self.state_err.lock().unwrap() = e;
         }
     }
 
@@ -3405,7 +3419,10 @@ mod tests {
         }
         fn set_state(&self, state: &Value) -> Result<(), String> {
             self.states.lock().unwrap().push(state.clone());
-            Ok(())
+            match self.state_err.lock().unwrap().clone() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
         }
         fn get_job_args(&self, _job_id: &str) -> Result<Value, String> {
             Ok(json!({}))
@@ -4005,6 +4022,35 @@ mod tests {
     }
 
     // ─── TestRunReconnaissance ───
+
+    #[test]
+    fn state_publish_failure_never_kills_the_run() {
+        // robots#303 (D2 census 2026-11-02): the 16:30 blip outlasted
+        // the transport's 3 send retries and the spent set_state error
+        // propagated out of run() via update_state — whole tenders died
+        // mid-room (witness d36b6f9a; the D2 witness truncated at keep
+        // 0.976). A periodic publish must degrade like every sibling
+        // write: log, skip, retry the next refresh.
+        let ledger = Arc::new(FakeLedger::new());
+        let wmill = FakeWmill::new(vec![]);
+        wmill.set_state_err(Some(
+            "error sending request for url (http://localhost:38915/api/w/godon/resources/update_value/...)".to_string(),
+        ));
+        let handle = wmill.clone();
+        let mut w = make_worker(
+            base_config(json!({})),
+            ledger,
+            FakeCoord::new(vec![], vec![]),
+            wmill,
+            BTreeMap::new(),
+        );
+        w.update_state()
+            .expect("a spent state publish must not kill the run");
+        assert!(
+            !handle.states.lock().unwrap().is_empty(),
+            "the refresh still built and attempted the publish"
+        );
+    }
 
     #[test]
     fn recon_returns_metrics_from_recon() {
