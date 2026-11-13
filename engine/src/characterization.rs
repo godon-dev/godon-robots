@@ -32,11 +32,16 @@ impl LevelKey {
 /// piecewise linear interpolation between adjacent measured points; no
 /// extrapolation.
 pub struct ResponseCurve {
-    pub convergence_threshold: f64,
+    /// Declared precision as a DIMENSIONLESS FRACTION of the curve's
+    /// own measured response scale (#309 cure, 2026-11-13): the
+    /// demand "distinguish below 1% of scale" means the same on every
+    /// objective, bench, and era. Declared, never measured — the
+    /// world's noise is the cost and is arbitrated elsewhere.
+    pub convergence_fraction: f64,
     pub min_points: usize,
     grid_size: usize,
 
-    /// measured points (level, response_shift), insertion-ordered
+    /// measured points (level, response), insertion-ordered
     points: Vec<(f64, f64)>,
     /// previous interpolation snapshot (for convergence comparison)
     prev_interp: Option<Vec<(f64, f64)>>,
@@ -47,9 +52,9 @@ pub struct ResponseCurve {
 }
 
 impl ResponseCurve {
-    pub fn new(convergence_threshold: f64, min_points: usize) -> Self {
+    pub fn new(convergence_fraction: f64, min_points: usize) -> Self {
         ResponseCurve {
-            convergence_threshold,
+            convergence_fraction,
             min_points,
             grid_size: 200,
             points: Vec::new(),
@@ -70,7 +75,41 @@ impl ResponseCurve {
         self.points.len()
     }
 
-    /// True when the last added point barely moved the surface.
+    /// The curve's own measured response scale — max−min of the
+    /// responses measured so far. THE denominator #309 names: "the
+    /// per-dial scale it already measures". 0.0 while fewer than
+    /// two points or an exactly flat surface.
+    pub fn response_scale(&self) -> f64 {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for (_, r) in &self.points {
+            if *r < min {
+                min = *r;
+            }
+            if *r > max {
+                max = *r;
+            }
+        }
+        if min.is_finite() && max.is_finite() {
+            max - min
+        } else {
+            0.0
+        }
+    }
+
+    /// The effective bar in the objective's own units: the declared
+    /// fraction of the curve's measured scale.
+    pub fn effective_bar(&self) -> f64 {
+        self.convergence_fraction * self.response_scale()
+    }
+
+    /// True when the last added point barely moved the surface —
+    /// "barely" measured as a FRACTION OF THE CURVE'S OWN SCALE
+    /// (honest units, #309): the same declared precision means the
+    /// same thing on a ~1.2 throughput objective and a ~3700 energy
+    /// objective. A curve whose measured responses are exactly flat
+    /// (scale 0) has nothing left to distinguish below any fraction
+    /// of zero: converged (min_points still gates the early curve).
     pub fn is_converged(&self) -> bool {
         if self.delta_history.is_empty() {
             return false;
@@ -78,7 +117,11 @@ impl ResponseCurve {
         if self.num_points() < self.min_points {
             return false;
         }
-        self.delta_history[self.delta_history.len() - 1] < self.convergence_threshold
+        let scale = self.response_scale();
+        if scale == 0.0 {
+            return true;
+        }
+        self.delta_history[self.delta_history.len() - 1] < self.effective_bar()
     }
 
     /// Convergence delta from the most recent point addition.
@@ -222,6 +265,8 @@ impl ResponseCurve {
                 max_slope: 0.0,
                 level_range: None,
                 response_range: None,
+                convergence_fraction: self.convergence_fraction,
+                effective_bar: self.effective_bar(),
             };
         }
         let mut slopes = Vec::new();
@@ -249,6 +294,8 @@ impl ResponseCurve {
                 pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
                 pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
             )),
+            convergence_fraction: self.convergence_fraction,
+            effective_bar: self.effective_bar(),
         }
     }
 }
@@ -263,6 +310,12 @@ pub struct CurveSummary {
     pub max_slope: f64,
     pub level_range: Option<(f64, f64)>,
     pub response_range: Option<(f64, f64)>,
+    /// The declared precision (fraction of scale) this curve runs
+    /// under — receipts cite it (room stamps, #309).
+    pub convergence_fraction: f64,
+    /// The bar in the objective's own units: fraction × measured
+    /// scale at summary time.
+    pub effective_bar: f64,
 }
 
 fn round6(v: f64) -> f64 {
@@ -430,8 +483,51 @@ mod tests {
         let delta_after = curve.add_point(50.0, response_drifted);
 
         assert!(
-            delta_after > curve.convergence_threshold,
-            "Drift should cause delta above threshold: {delta_after:.4}"
+            delta_after > curve.effective_bar(),
+            "Drift should cause delta above the fraction bar: {delta_after:.4} vs {:.4}",
+            curve.effective_bar()
+        );
+    }
+
+    // The #309 receipt as a test: same declared fraction, two
+    // objectives of wildly different scale in one room. The energy
+    // twin (~3700) retires at a movement that the old absolute 0.02
+    // bar would have ground on forever; the throughput twin (~1.2)
+    // stays honest at the same fraction.
+    #[test]
+    fn fraction_bar_scales_with_the_objective() {
+        // throughput twin: responses span 0..1.2 — a big re-measure
+        // (1.2 -> 1.5 at level 100) moves the surface ~0.15 mean,
+        // 10% of scale: far above the 2% bar, must NOT retire.
+        let mut throughput = ResponseCurve::new(0.02, 3);
+        throughput.add_point(0.0, 0.0);
+        throughput.add_point(100.0, 1.2);
+        throughput.add_point(50.0, 0.6);
+        let d = throughput.add_point(100.0, 1.5);
+        assert!(
+            d > throughput.effective_bar(),
+            "{d:.4} must stay above the {:.4} bar (10%-of-scale move vs a 2% demand)",
+            throughput.effective_bar()
+        );
+        assert!(!throughput.is_converged());
+
+        // energy twin: responses span 0..3700 — the SAME 3.0 absolute
+        // re-measure is 0.08% of scale: far below the 2% bar. The
+        // old absolute rule (0.02) would never retire this curve
+        // (surface delta ~1.5 >> 0.02) — the maximal-density disease.
+        let mut energy = ResponseCurve::new(0.02, 3);
+        energy.add_point(0.0, 0.0);
+        energy.add_point(100.0, 3700.0);
+        energy.add_point(50.0, 1850.0);
+        let d = energy.add_point(100.0, 3703.0);
+        assert!(
+            d < energy.effective_bar(),
+            "{d:.4} must fall below the {:.4} bar — sub-percent-of-scale movement retires",
+            energy.effective_bar()
+        );
+        assert!(
+            energy.is_converged(),
+            "the #309 energy-scale disease is cured: honest units retire the curve"
         );
     }
 
@@ -452,9 +548,10 @@ mod tests {
 
         assert!(curve.is_converged(), "Stationary linear should converge");
         assert!(
-            curve.last_delta() < 0.001,
-            "Last delta should be ~0 for stationary: {}",
-            curve.last_delta()
+            curve.last_delta() < curve.effective_bar(),
+            "Last delta should sit under the fraction bar: {} vs {}",
+            curve.last_delta(),
+            curve.effective_bar()
         );
     }
 }
