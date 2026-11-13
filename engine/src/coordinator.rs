@@ -63,7 +63,8 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
 
     // ── walk/characterization half state (the python object's own) ──
     /// Characterization precision — the one customer-facing knob
-    /// (default 0.02, `convergence_threshold`).
+    /// (`convergence_threshold` in det; default: estate env
+    /// GODON_CONVERGENCE_THRESHOLD, else 0.02).
     pub convergence_threshold: f64,
     /// Max recursive refinement insertions between two measured
     /// points (default 3).
@@ -166,7 +167,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             convergence_threshold: det
                 .get("convergence_threshold")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.02),
+                .unwrap_or_else(estate_default_convergence),
             refinement_depth: det
                 .get("refinement_depth")
                 .and_then(|v| v.as_i64())
@@ -884,6 +885,48 @@ pub fn register_interference_systemtender<C: Connect>(
         txn.commit().map_err(DbError::from)?;
         Ok(())
     })
+}
+
+// ── estate default bar (precision-contract ruling, 2026-10-31) ──
+// Precedence: det > GODON_CONVERGENCE_THRESHOLD (charts env) > 0.02.
+// The env term is the ESTATE default — one declared bar for every
+// tender whose det is silent; the det stays the group-uniform study
+// override; the UPDATE door stays the runtime lever (no live reload;
+// respawn picks up new det in seconds).
+
+/// Parses an env bar honestly: a missing, unparsable, non-finite, or
+/// non-positive value yields None (never a silently nonsense bar).
+fn parse_env_bar(raw: Option<String>) -> Option<f64> {
+    raw?.parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+pub fn estate_default_convergence() -> f64 {
+    parse_env_bar(std::env::var("GODON_CONVERGENCE_THRESHOLD").ok()).unwrap_or(0.02)
+}
+
+#[cfg(test)]
+mod convergence_default_tests {
+    use super::*;
+
+    #[test]
+    fn env_bar_parses_only_sane_values() {
+        assert_eq!(parse_env_bar(None), None);
+        assert_eq!(parse_env_bar(Some("0.05".into())), Some(0.05));
+        assert_eq!(parse_env_bar(Some("junk".into())), None);
+        assert_eq!(parse_env_bar(Some("0".into())), None);
+        assert_eq!(parse_env_bar(Some("-1".into())), None);
+        assert_eq!(parse_env_bar(Some("inf".into())), None);
+    }
+
+    #[test]
+    fn estate_default_is_0_02_when_env_silent() {
+        // Only this test touches the var; remove_var keeps the assert
+        // honest on a runner that happens to carry it.
+        std::env::remove_var("GODON_CONVERGENCE_THRESHOLD");
+        assert_eq!(estate_default_convergence(), 0.02);
+    }
 }
 
 #[cfg(test)]
