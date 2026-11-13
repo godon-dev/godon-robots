@@ -1042,10 +1042,36 @@ impl<K: Coordinator> Worker<K> {
     /// Effectuate the shaped settings, then measure. Total effectuation
     /// failure raises (the RuntimeError — the trial fails loud);
     /// anything else parks objectives at infinity.
+    ///
+    /// The finite-settings gate (robots#307): every dial value must be
+    /// a finite NUMBER. serde_json renders a non-finite f64 as null —
+    /// by the time settings reach here the poison is a Null dial — and
+    /// a null dial silently 422s at the bench. Returns the first
+    /// offender's name.
+    pub fn first_non_finite_setting(settings: &Map<String, Value>) -> Option<String> {
+        settings.iter().find_map(|(k, v)| {
+            let finite = matches!(v, Value::Number(n) if n.as_f64().is_some_and(f64::is_finite));
+            (!finite).then(|| k.clone())
+        })
+    }
+
     pub fn execute_trial(
         &mut self,
         settings: &Map<String, Value>,
     ) -> Result<BTreeMap<String, f64>, String> {
+        // robots#307 (the B6 NaN lock): a non-finite dial proposal is
+        // refused at the source. serde_json renders NaN/∞ as null, and
+        // a null dial silently 422s at the bench (framework rejection,
+        // app log quiet) while no reading ever returns — the walk then
+        // dead-loops on the same poisoned proposal. Never POST a NaN.
+        if let Some(dial) = Self::first_non_finite_setting(settings) {
+            log::error!(
+                "non-finite proposal for dial '{dial}' — refusing to effectuate (robots#307)"
+            );
+            return Err(format!(
+                "non-finite proposal for dial '{dial}' — refused at the source (robots#307)"
+            ));
+        }
         let targets = self
             .config
             .get("effectuation")
@@ -1094,6 +1120,24 @@ impl<K: Coordinator> Worker<K> {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         if successful == 0 && failed > 0 {
+            // robots#307: the failed rows' own error text ships to the
+            // log — "HTTP 422: ...invalid type: null..." names the dial
+            // in one query. Until now the row's verdict was unlogged
+            // anywhere, which is what made the B6 class cost an hour.
+            if let Some(rows) = eff_result.get("results").and_then(|r| r.as_array()) {
+                for row in rows
+                    .iter()
+                    .filter(|r| !r.get("success").and_then(|s| s.as_bool()).unwrap_or(false))
+                {
+                    log::warn!(
+                        "effectuation row failed: {} -> {}",
+                        row.get("url").and_then(|u| u.as_str()).unwrap_or("-"),
+                        row.get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("unknown")
+                    );
+                }
+            }
             let failed_targets: Vec<String> = eff_result
                 .get("results")
                 .and_then(|r| r.as_array())
@@ -3117,6 +3161,44 @@ fn move_is_mine(mv: &Value, single: bool, systemtender_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── first_non_finite_setting (robots#307: the B6 NaN lock) ───
+
+    fn settings_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn finite_settings_pass() {
+        let s = settings_of(&[("power_draw", json!(500.0)), ("sim_steps", json!(50))]);
+        assert_eq!(Worker::<FakeCoord>::first_non_finite_setting(&s), None);
+    }
+
+    #[test]
+    fn null_dial_is_the_poison_and_names_its_dial() {
+        // serde_json renders a non-finite f64 as Null — the exact body
+        // that silently 422s at the bench (robots#307 receipt).
+        let s = settings_of(&[
+            ("power_draw", json!(500.0)),
+            ("storage_dispatch", Value::Null),
+        ]);
+        assert_eq!(
+            Worker::<FakeCoord>::first_non_finite_setting(&s),
+            Some("storage_dispatch".to_string())
+        );
+    }
+
+    #[test]
+    fn non_number_dials_refuse_too() {
+        let s = settings_of(&[("power_draw", json!("500"))]);
+        assert_eq!(
+            Worker::<FakeCoord>::first_non_finite_setting(&s),
+            Some("power_draw".to_string())
+        );
+    }
 
     // ─── serve_decision (godon#434: the serve IS a hold) ───
 
