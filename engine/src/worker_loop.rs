@@ -1050,7 +1050,7 @@ impl<K: Coordinator> Worker<K> {
     /// offender's name.
     pub fn first_non_finite_setting(settings: &Map<String, Value>) -> Option<String> {
         settings.iter().find_map(|(k, v)| {
-            let finite = matches!(v, Value::Number(n) if n.as_f64().map_or(false, f64::is_finite));
+            let finite = matches!(v, Value::Number(n) if n.as_f64().is_some_and(f64::is_finite));
             (!finite).then(|| k.clone())
         })
     }
