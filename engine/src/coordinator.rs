@@ -62,9 +62,13 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     pub http: Arc<dyn HttpTransport>,
 
     // ── walk/characterization half state (the python object's own) ──
-    /// Characterization precision — the one customer-facing knob
-    /// (default 0.02, `convergence_threshold`).
-    pub convergence_threshold: f64,
+    /// Characterization precision — the one customer-facing knob,
+    /// now a DIMENSIONLESS FRACTION of each objective's own measured
+    /// scale (#309 cure, config namespace 2026-11-13). Resolved ONCE
+    /// at spawn from the estate's policy/convergence_fraction and
+    /// frozen for the tender's whole life; the estate default moves
+    /// BETWEEN rooms.
+    pub convergence_fraction: f64,
     /// Max recursive refinement insertions between two measured
     /// points (default 3).
     pub refinement_depth: i64,
@@ -112,13 +116,27 @@ impl ProbeCoordinator<DsnConnect> {
         config: &Value,
         hooks: CoordHooks,
         dsn: &str,
+        convergence_fraction: f64,
     ) -> Result<Self, DbError> {
-        Ok(Self::new(systemtender_id, config, DsnConnect::new(dsn)?, hooks).with_pool(dsn))
+        Ok(Self::new(
+            systemtender_id,
+            config,
+            DsnConnect::new(dsn)?,
+            hooks,
+            convergence_fraction,
+        )
+        .with_pool(dsn))
     }
 }
 
 impl<C: Connect> ProbeCoordinator<C> {
-    pub fn new(systemtender_id: &str, config: &Value, conn: C, hooks: CoordHooks) -> Self {
+    pub fn new(
+        systemtender_id: &str,
+        config: &Value,
+        conn: C,
+        hooks: CoordHooks,
+        convergence_fraction: f64,
+    ) -> Self {
         let det = config
             .get("interference_detection")
             .or_else(|| config.get("detection"))
@@ -163,10 +181,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                 .http
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::walk_policy::ReqwestTransport)),
-            convergence_threshold: det
-                .get("convergence_threshold")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.02),
+            convergence_fraction,
             refinement_depth: det
                 .get("refinement_depth")
                 .and_then(|v| v.as_i64())
@@ -924,8 +939,8 @@ pub(crate) mod db_tests {
         }
         drop(client);
         let cfg = serde_json::json!({"detection": {"group": "rung10"}});
-        let a = ProbeCoordinator::new_dsn("tender-a", &cfg, hooks(), dsn).unwrap();
-        let b = ProbeCoordinator::new_dsn("tender-b", &cfg, hooks(), dsn).unwrap();
+        let a = ProbeCoordinator::new_dsn("tender-a", &cfg, hooks(), dsn, 0.02).unwrap();
+        let b = ProbeCoordinator::new_dsn("tender-b", &cfg, hooks(), dsn, 0.02).unwrap();
         a.ensure_tables().unwrap();
         register_interference_systemtender(&DsnConnect::new(dsn).unwrap(), "tender-a", "rung10")
             .unwrap();

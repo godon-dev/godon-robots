@@ -401,7 +401,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             // python datetime.now().isoformat(): naive, microseconds
             "push_start": push_start.naive_utc().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             "pause_end": pause_end.naive_utc().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
-            "convergence_threshold": num(self.convergence_threshold),
+            "convergence_fraction": num(self.convergence_fraction),
         });
         if let Some(b) = self.param_bounds.borrow().get(&probe.param_name) {
             payload["param_range"] = num(b.upper - b.lower);
@@ -677,10 +677,10 @@ impl<C: Connect> ProbeCoordinator<C> {
             })
             .unwrap_or_default();
         log::info!(
-            "CHAR INIT: {} params, floors: {}, threshold={}",
+            "CHAR INIT: {} params, floors: {}, fraction={}",
             param_names.len(),
             floors,
-            self.convergence_threshold
+            self.convergence_fraction
         );
         Ok(())
     }
@@ -1716,7 +1716,6 @@ mod walk_tests {
             "push_block_size": 3,
             "pause_block_size": 3,
             "cooldown_trials": 1,
-            "convergence_threshold": 0.02,
             "refinement_depth": 3,
             "walk_policy": "ladder",
             "causal_url": "http://causal.test",
@@ -1839,7 +1838,7 @@ mod walk_tests {
             walk_transport: None,
             http: Some(Arc::new(stub)),
         };
-        let coord = ProbeCoordinator::new("test-sender-1", cfg, Offline, hooks);
+        let coord = ProbeCoordinator::new("test-sender-1", cfg, Offline, hooks, 0.02);
         // the python harness marks the room initialized and seeds a
         // debt-free map — identical contract here
         *coord.initialized.borrow_mut() = true;
@@ -1913,7 +1912,7 @@ mod walk_tests {
             "interference_detection": {"group": "g", "walk_policy": "ladder"},
         });
         let hooks = CoordHooks::new(Arc::new(fake_upper_bounds));
-        let coord = ProbeCoordinator::new("t", &cfg, Offline, hooks);
+        let coord = ProbeCoordinator::new("t", &cfg, Offline, hooks, 0.02);
         *coord.initialized.borrow_mut() = true;
         let p = coord.get_neutral_params().unwrap();
         assert_eq!(p["p"], json!(4)); // int bounds → int midpoint
@@ -1921,7 +1920,7 @@ mod walk_tests {
         // nothing collectable → None
         let cfg2 = json!({"settings": {}, "interference_detection": {}});
         let hooks2 = CoordHooks::new(Arc::new(fake_upper_bounds));
-        let coord2 = ProbeCoordinator::new("t", &cfg2, Offline, hooks2);
+        let coord2 = ProbeCoordinator::new("t", &cfg2, Offline, hooks2, 0.02);
         assert!(coord2.get_neutral_params().is_none());
     }
 
@@ -2454,7 +2453,7 @@ mod room_walk_tests {
             walk_transport: None,
             http: Some(Arc::new(http)),
         };
-        ProbeCoordinator::new_dsn("tender-a", cfg, hooks, dsn_str).unwrap()
+        ProbeCoordinator::new_dsn("tender-a", cfg, hooks, dsn_str, 0.02).unwrap()
     }
 
     fn fresh_room(

@@ -605,6 +605,57 @@ pub struct Worker<K: Coordinator> {
     pub last_metric_noise: BTreeMap<String, f64>,
 }
 
+/// The spawn-time settings read (config namespace, 2026-11-13
+/// settlement): resolve the estate's numbers ONCE at startup and hold
+/// them for the tender's whole life — freeze at spawn. The estate
+/// default is moved BETWEEN rooms (policy moves are guarded while
+/// any tender is live). Fails loud on every seam: a tender never
+/// boots on an unreadable or absent measurement contract — no
+/// silent defaults.
+fn read_convergence_fraction() -> Result<f64, crate::worker::WorkerError> {
+    use crate::worker::WorkerError;
+    let base = std::env::var("GODON_API_URL").map_err(|_| {
+        WorkerError::Init(
+            "GODON_API_URL not set — the spawn-time settings read cannot reach the estate api"
+                .into(),
+        )
+    })?;
+    let url = format!(
+        "{}/settings/policy/convergence_fraction",
+        base.trim_end_matches('/')
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| WorkerError::Init(format!("settings read client: {e}")))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| WorkerError::Init(format!("settings read failed ({url}): {e}")))?;
+    if !resp.status().is_success() {
+        return Err(WorkerError::Init(format!(
+            "settings read {url} answered {}",
+            resp.status()
+        )));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| WorkerError::Init(format!("settings read body unreadable ({url}): {e}")))?;
+    let value = body.get("value").and_then(|v| v.as_f64()).ok_or_else(|| {
+        WorkerError::Init(format!(
+            "settings leaf carries no value ({url}) — origin {:?}: seed the estate before spawning tenders",
+            body.get("origin").and_then(|o| o.as_str()).unwrap_or("?")
+        ))
+    })?;
+    if !value.is_finite() || value <= 0.0 || value >= 1.0 {
+        return Err(WorkerError::Init(format!(
+            "convergence_fraction out of range (0,1): {value} ({url})"
+        )));
+    }
+    log::info!("SETTINGS FREEZE: convergence_fraction={value} from {url}");
+    Ok(value)
+}
+
 impl<K: Coordinator> Worker<K> {
     /// The python `__init__` + `_init_body` order, one constructor:
     /// config parse, ledger init, heartbeat, coordinator wiring (the
@@ -778,6 +829,7 @@ impl<K: Coordinator> Worker<K> {
             &config,
             deps.shared_db.clone(),
             hooks,
+            read_convergence_fraction()?,
         );
         // the shared-db held connection — the coordination verbs stop
         // paying a handshake each (the census cure)
@@ -3161,6 +3213,89 @@ fn move_is_mine(mv: &Value, single: bool, systemtender_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── the spawn-time settings read (config namespace, 2026-11-13) ───
+
+    /// env-mutating tests serialize — parallel set/remove races (the
+    /// images repo's ENV_MUTEX lesson, banked 2026-11-13)
+    static SETTINGS_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// One-shot HTTP stub: answers one GET with `status` + `body`,
+    /// then closes. Returns the base url to point GODON_API_URL at.
+    fn settings_stub(body: &'static str, status: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 4096];
+                let _n = sock.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn spawn_read_freezes_the_estate_fraction() {
+        let _env = SETTINGS_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let base = settings_stub(
+            r#"{"value":0.02,"origin":"seed","moved_by":"seeder"}"#,
+            "200 OK",
+        );
+        std::env::set_var("GODON_API_URL", &base);
+        let v = read_convergence_fraction().expect("the seeded leaf freezes");
+        std::env::remove_var("GODON_API_URL");
+        assert_eq!(v, 0.02);
+    }
+
+    #[test]
+    fn spawn_read_refuses_an_unset_leaf() {
+        let _env = SETTINGS_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let base = settings_stub(r#"{"origin":"unset"}"#, "200 OK");
+        std::env::set_var("GODON_API_URL", &base);
+        let err = read_convergence_fraction().unwrap_err().to_string();
+        std::env::remove_var("GODON_API_URL");
+        assert!(
+            err.contains("carries no value") && err.contains("unset"),
+            "an unseeded estate fails the boot loudly: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_read_refuses_out_of_range_fractions() {
+        let _env = SETTINGS_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let base = settings_stub(r#"{"value":1.5}"#, "200 OK");
+        std::env::set_var("GODON_API_URL", &base);
+        let err = read_convergence_fraction().unwrap_err().to_string();
+        std::env::remove_var("GODON_API_URL");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn spawn_read_fails_loud_when_the_api_is_unreachable() {
+        let _env = SETTINGS_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        // a bound-then-dropped listener: the port answers nothing
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        std::env::set_var("GODON_API_URL", format!("http://{addr}"));
+        let err = read_convergence_fraction().unwrap_err().to_string();
+        std::env::remove_var("GODON_API_URL");
+        assert!(err.contains("settings read failed"), "{err}");
+    }
+
+    #[test]
+    fn spawn_read_requires_the_api_url() {
+        let _env = SETTINGS_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("GODON_API_URL");
+        let err = read_convergence_fraction().unwrap_err().to_string();
+        assert!(err.contains("GODON_API_URL not set"), "{err}");
+    }
 
     // ─── first_non_finite_setting (robots#307: the B6 NaN lock) ───
 

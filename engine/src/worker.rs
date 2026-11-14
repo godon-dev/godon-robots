@@ -19,6 +19,12 @@ pub enum WorkerError {
     /// boot between the group read and the creation_ts check
     /// (python's own ordering, so it wins when both are wrong)
     UnknownStrain(String),
+    /// the per-tender precision slot died with the config namespace
+    /// (2026-11-13 settlement): precision is declared at the estate
+    /// level (policy/convergence_fraction) and frozen at spawn. A
+    /// config file still carrying the dead field is refused loudly —
+    /// a silently ignored number is the mixed-bar hazard reborn.
+    DeadPrecisionSlot,
     /// ledger/schema init failure (python let psycopg2's own exception
     /// out of __init__; the typed rust surface names it here)
     Init(String),
@@ -34,6 +40,12 @@ impl std::fmt::Display for WorkerError {
                 write!(f, "unparseable creation_ts: {s}")
             }
             WorkerError::UnknownStrain(msg) => write!(f, "{msg}"),
+            WorkerError::DeadPrecisionSlot => write!(
+                f,
+                "convergence_threshold died with the config namespace — declare precision at \
+                 the estate level (policy/convergence_fraction, moved between rooms); remove \
+                 the field from the tender's config file"
+            ),
             WorkerError::Init(s) => write!(f, "worker init failed: {s}"),
         }
     }
@@ -113,6 +125,16 @@ impl WorkerConfig {
             .and_then(|v| v.as_str())
             .ok_or(WorkerError::MissingCreationTs)?;
         let creation_ts = parse_creation_ts(creation_raw)?;
+
+        // The config namespace settlement (2026-11-13): the per-tender
+        // precision slot is DEAD — the estate's policy/convergence_
+        // fraction, read once at spawn, carries every room. A config
+        // still carrying the field is refused with one line, never
+        // silently ignored (the hygiene refusal; rides the namespace
+        // build).
+        if det.get("convergence_threshold").is_some() {
+            return Err(WorkerError::DeadPrecisionSlot);
+        }
 
         Ok(WorkerConfig {
             systemtender_type,
@@ -288,11 +310,43 @@ mod tests {
     fn unknown_strain_wins_over_missing_creation_ts() {
         // python raised load_strain BEFORE the creation_ts check —
         // both wrong means the strain error surfaces
+        let err =
+            WorkerConfig::from_value(&json!({"systemtender": {"type": "nonexistent_strain"}}))
+                .unwrap_err();
+        assert!(err.to_string().starts_with("Unknown strain type"));
+    }
+
+    #[test]
+    fn dead_precision_slot_is_refused_with_one_line() {
+        // the config namespace settlement (2026-11-13): the per-tender
+        // precision slot died — a config carrying it is refused loudly,
+        // never silently ignored (the hygiene refusal)
         let err = WorkerConfig::from_value(&json!({
-            "systemtender": {"type": "nonexistent_strain"}
+            "systemtender": {"type": "bench_generic"},
+            "creation_ts": "2026-10-10T12:00:00+00:00",
+            "interference_detection": {"group": "g", "convergence_threshold": 0.02}
         }))
         .unwrap_err();
-        assert!(err.to_string().starts_with("Unknown strain type"));
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("convergence_threshold died with the config namespace")
+                && msg.contains("policy/convergence_fraction"),
+            "one line, naming where precision now lives: {msg}"
+        );
+        // the legacy `detection` alias carries the same refusal
+        let err = WorkerConfig::from_value(&json!({
+            "systemtender": {"type": "bench_generic"},
+            "creation_ts": "2026-10-10T12:00:00+00:00",
+            "detection": {"convergence_threshold": 0.05}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().starts_with("convergence_threshold died"));
+        // a SILENT config parses clean — the estate default carries it
+        assert!(WorkerConfig::from_value(&json!({
+            "systemtender": {"type": "bench_generic"},
+            "creation_ts": "2026-10-10T12:00:00+00:00"
+        }))
+        .is_ok());
     }
 
     #[test]
