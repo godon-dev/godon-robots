@@ -93,6 +93,9 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     /// until the listeners have had their wake slice and one trial
     /// (`first_round_grace`); spent when that block starts.
     pub(crate) lease_acquired_at: RefCell<Option<DateTime<Utc>>>,
+    /// The standing duty's probe, built before the lease was taken (`probe_in_hand`)
+    /// and kept for the first push block of that lease.
+    pub(crate) duty_probe_in_hand: RefCell<Option<Probe>>,
     /// causal RTT history (seconds, rolling 10), logged per answered call, and the
     /// system's own trial-duration history
     pub(crate) causal_rtt_history: RefCell<Vec<f64>>,
@@ -210,6 +213,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             round_push_start: RefCell::new(None),
             round_pause_end: RefCell::new(None),
             lease_acquired_at: RefCell::new(None),
+            duty_probe_in_hand: RefCell::new(None),
             causal_rtt_history: RefCell::new(Vec::new()),
             trial_duration_history: RefCell::new(Vec::new()),
             round_length_history: RefCell::new(Vec::new()),
