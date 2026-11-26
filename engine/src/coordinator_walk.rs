@@ -442,6 +442,47 @@ impl<C: Connect> ProbeCoordinator<C> {
         None
     }
 
+    /// Whether this walker has a level in hand for a fresh lease: a wish's
+    /// remeasure, the walk's next level (a non-advancing look — the level is
+    /// named, not consumed), or the standing duty's probe (built here from the
+    /// cached debt list and kept in `duty_probe_in_hand` for the first block).
+    /// False without one, and on a dark view. A walker without a level in hand
+    /// does not take the room's one microphone (room 45874805293: 262 of 305
+    /// acquisitions found nothing to probe, held the lease ~1.5 s each and let go).
+    fn probe_in_hand(&self) -> Result<bool, CoordError> {
+        if self.probe_override.borrow().is_some() {
+            return Ok(true);
+        }
+        let converged = self.converged_params.borrow().clone();
+        let can = {
+            let mut walk = self.char_walk.borrow_mut();
+            match walk.as_mut() {
+                None => return Ok(false),
+                Some(w) => match w.can_probe(&converged) {
+                    Ok(can) => can,
+                    Err(WalkError::Unavailable(e)) => {
+                        log::info!("PROBE IN HAND: view unavailable ({e}) — no lease taken");
+                        return Ok(false);
+                    }
+                    Err(loud) => return Err(loud.into()),
+                },
+            }
+        };
+        if can {
+            return Ok(true);
+        }
+        let duty = match self.ambience_duty_probe_with(false) {
+            Ok(p) => p,
+            Err(WalkError::Unavailable(e)) => {
+                log::info!("PROBE IN HAND: duty consult dark ({e}) — no lease taken");
+                return Ok(false);
+            }
+            Err(loud) => return Err(loud.into()),
+        };
+        *self.duty_probe_in_hand.borrow_mut() = duty;
+        Ok(self.duty_probe_in_hand.borrow().is_some())
+    }
+
     // ─── Causal Client ───────────────────────────────────────────────
 
     /// Call causal's real-time endpoint after a probe round completes.
@@ -639,6 +680,7 @@ impl<C: Connect> ProbeCoordinator<C> {
 
     /// Build the deterministic coverage walk over all params.
     pub(crate) fn init_characterization(&self) -> Result<(), CoordError> {
+        *self.duty_probe_in_hand.borrow_mut() = None;
         if self.get_neutral_params().is_none() {
             return Ok(());
         }
@@ -933,7 +975,14 @@ impl<C: Connect> ProbeCoordinator<C> {
     /// held value. Ok(None) when the map names no debt this boundary
     /// (or the named dials are unknown to this strain).
     pub(crate) fn ambience_duty_probe(&self) -> Result<Option<Probe>, WalkError> {
-        let Some(debt) = self.ambience_debt(true) else {
+        self.ambience_duty_probe_with(true)
+    }
+
+    /// `ambience_duty_probe` on the cached debt list when `force` is false: the
+    /// pre-lease look (`probe_in_hand`) runs on every idle trial and must not
+    /// consult the notebook each time.
+    fn ambience_duty_probe_with(&self, force: bool) -> Result<Option<Probe>, WalkError> {
+        let Some(debt) = self.ambience_debt(force) else {
             return Err(WalkError::Unavailable("ambience-duty consult dark".into()));
         };
         let entry = debt.iter().find(|e| {
@@ -1358,14 +1407,20 @@ impl<C: Connect> ProbeCoordinator<C> {
             log::info!("WALK RE-OPENED: probe override pending — the wish's remeasure");
         }
 
-        // Try to become sender
-        if self.try_acquire_lease(CoordState::ProbePush.as_str()) {
+        // Try to become sender — only with a level in hand (`probe_in_hand`)
+        let in_hand = self.probe_in_hand()?;
+        if in_hand && self.try_acquire_lease(CoordState::ProbePush.as_str()) {
             log::info!("Acquired lease — starting characterization");
             *self.state.borrow_mut() = CoordState::ProbePush;
             *self.push_count.borrow_mut() = 0;
             *self.lease_acquired_at.borrow_mut() = Some(Utc::now());
             *self.neutral_params.borrow_mut() = None; // force recompute
             return self.handle_probe_push(trial_number);
+        }
+
+        if !in_hand {
+            // nothing to push: no candidate for the rota until a level is in hand
+            self.publish_demand(false);
         }
 
         // Someone else is sender — become receiver
@@ -1465,8 +1520,11 @@ impl<C: Connect> ProbeCoordinator<C> {
             // probe (the lease, push/pause windows and characterize
             // calls stay this coordinator's own machinery). Cleared
             // when its levels are exhausted — the walk then resumes.
-            let mut probe = None;
-            if self.probe_override.borrow().is_some() {
+            // the duty's probe built before the lease was taken, else the usual chain
+            // (a wish's remeasure that arrives after the look waits one block: the
+            // kept probe goes first, the override serves the next boundary)
+            let mut probe = self.duty_probe_in_hand.borrow_mut().take();
+            if probe.is_none() && self.probe_override.borrow().is_some() {
                 probe = self.override_next_probe();
             }
             if probe.is_none() {
@@ -1657,7 +1715,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     .cloned()
                     .collect()
             };
-            if !non_converged.is_empty() && self.walk_pending()? {
+            if !non_converged.is_empty() && self.walk_pending()? && self.probe_in_hand()? {
                 log::info!("COOLDOWN: done — re-acquiring for more probes");
                 if self.try_acquire_lease(CoordState::ProbePush.as_str()) {
                     log::info!(
@@ -1668,6 +1726,9 @@ impl<C: Connect> ProbeCoordinator<C> {
                     *self.lease_acquired_at.borrow_mut() = Some(Utc::now());
                     return self.handle_probe_push(trial_number);
                 }
+            } else if !non_converged.is_empty() {
+                // out of cooldown with no level in hand: no candidate until one is
+                self.publish_demand(false);
             }
             log::info!("COOLDOWN: done — back to IDLE");
             *self.state.borrow_mut() = CoordState::Idle;
@@ -2059,6 +2120,91 @@ mod walk_tests {
         assert!(coord.first_block_waits().is_none());
         assert!(coord.lease_acquired_at.borrow().is_none());
         assert!(coord.first_block_waits().is_none());
+    }
+
+    // ── a walker takes the lease only with a level in hand ──────────
+
+    fn duty_entry(gaps: Value) -> Value {
+        json!({
+            "param": "param_0",
+            "reason": "unmeasured_operating_point",
+            "anchor": 50.0,
+            "epoch": 1,
+            "levels": [0.0, 100.0],
+            "gaps": gaps,
+        })
+    }
+
+    fn exhausted(coord: &ProbeCoordinator<Offline>) {
+        let done: HashSet<String> = ["param_0".to_string()].into_iter().collect();
+        *coord.converged_params.borrow_mut() = done;
+        // make_coord seeds a debt-free map; the look must reach the stub's answer
+        *coord.ambience_debt_cache.borrow_mut() = None;
+    }
+
+    #[test]
+    fn without_a_walk_nothing_is_in_hand() {
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        assert!(!coord.probe_in_hand().unwrap());
+    }
+
+    #[test]
+    fn the_walks_next_level_is_in_hand_and_not_consumed() {
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        coord.init_characterization().unwrap();
+        assert!(coord.probe_in_hand().unwrap());
+        // the look does not advance the walk: its first level is still named
+        assert!(coord.ask_next_probe().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_named_operating_point_with_no_gap_leaves_the_hand_empty() {
+        // room 45874805293: the map names an unmeasured operating point whose gap
+        // midpoints are all banked -- the duty has nothing to probe; the walker
+        // must not take the lease for it (262 of 305 acquisitions did)
+        let coord = make_coord(
+            &one_param(),
+            CausalStub::new(
+                vec![],
+                vec![Ok(json!({"debt": [duty_entry(json!([]))]})); 2],
+            ),
+        );
+        coord.init_characterization().unwrap();
+        exhausted(&coord);
+        assert!(
+            coord.walk_pending().unwrap(),
+            "the map still names the point: the walk stays pending"
+        );
+        assert!(!coord.probe_in_hand().unwrap());
+        assert!(coord.duty_probe_in_hand.borrow().is_none());
+        assert!(
+            coord.probe_override.borrow().is_none(),
+            "nothing set for nothing"
+        );
+    }
+
+    #[test]
+    fn the_dutys_probe_is_in_hand_and_kept_for_the_first_block() {
+        let entry = duty_entry(json!([{
+            "unresolved": true, "ignorance": 1.0, "bars_sum": 0.1,
+            "from_level": 20.0, "to_level": 30.0,
+        }]));
+        let coord = make_coord(
+            &one_param(),
+            CausalStub::new(vec![], vec![Ok(json!({"debt": [entry]}))]),
+        );
+        coord.init_characterization().unwrap();
+        exhausted(&coord);
+        assert!(coord.probe_in_hand().unwrap());
+        let kept = coord.duty_probe_in_hand.borrow().clone();
+        assert_eq!(kept.as_ref().unwrap().level, 25.0);
+        assert!(kept.as_ref().unwrap().ambience_anchor.is_some());
+        // a second look before the lease is taken keeps the same level
+        assert!(coord.probe_in_hand().unwrap());
+        assert_eq!(
+            coord.duty_probe_in_hand.borrow().as_ref().unwrap().level,
+            25.0
+        );
     }
 
     // ── neutral params (python _get_neutral_params) ──────────────────
@@ -2813,6 +2959,102 @@ mod room_walk_tests {
         // wait: solo means census count 1 < 2 → parks in IDLE, no acquire
         assert_eq!(a.get_state(), CoordState::Idle);
         assert_eq!(holder(&dsn), None);
+    }
+
+    fn nothing_to_probe(http_chars: Vec<Value>) -> Stub {
+        // the map names an unmeasured operating point with every gap midpoint banked
+        let entry = json!({
+            "param": "param_0", "reason": "unmeasured_operating_point", "anchor": 50.0,
+            "levels": [0.0, 100.0], "gaps": [],
+        });
+        Stub {
+            characterize: Arc::new(Mutex::new(http_chars.into_iter().map(Ok).collect())),
+            ambience: Arc::new(Mutex::new(
+                vec![Ok(json!({"debt": [entry]})); 6].into_iter().collect(),
+            )),
+        }
+    }
+
+    /// A walker with nothing in hand leaves the lease alone (room 45874805293's
+    /// thrash): the walk stays pending, but the walker neither takes the lease
+    /// nor counts as a candidate for the rota until it has a level
+    #[test]
+    fn a_walker_with_nothing_in_hand_leaves_the_lease_free() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = ROOM.lock().unwrap_or_else(|p| p.into_inner());
+        let http = nothing_to_probe(vec![]);
+        let cfg = ladder_cfg(json!({}));
+        let a = fresh_room(&dsn, &cfg, http, true);
+        *a.converged_params.borrow_mut() = ["param_0".to_string()].into_iter().collect();
+        for t in 1..=3 {
+            let d = a.decide_trial(t).unwrap();
+            assert_eq!(
+                a.get_state(),
+                CoordState::Idle,
+                "trial {t}: no lease, no cooldown"
+            );
+            assert_eq!(d.mode, "hold");
+            assert!(d.impulse_phase.is_none());
+        }
+        assert_eq!(holder(&dsn), None);
+        let mut client = postgres::Client::connect(&dsn, postgres::NoTls).unwrap();
+        let row = client
+            .query_one(
+                "SELECT walk_pending FROM interference_active_systemtenders \
+                 WHERE systemtender_id = 'tender-a'",
+                &[],
+            )
+            .unwrap();
+        assert!(
+            !row.get::<_, bool>(0),
+            "nothing in hand: no candidate for the rota"
+        );
+    }
+
+    /// The duty's probe is taken WITH the lease: the map names a probeable gap,
+    /// the walker takes the lease, parks its first block (the grace), then pushes
+    /// the duty's level
+    #[test]
+    fn the_dutys_probe_is_taken_with_the_lease() {
+        let Some(dsn) = dsn() else {
+            eprintln!("skipping: LEDGER_TEST_DSN not set");
+            return;
+        };
+        let _room = ROOM.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = json!({
+            "param": "param_0", "reason": "unmeasured_operating_point", "anchor": 50.0,
+            "epoch": 1, "levels": [0.0, 100.0],
+            "gaps": [{"unresolved": true, "ignorance": 1.0, "bars_sum": 0.1,
+                      "from_level": 20.0, "to_level": 30.0}],
+        });
+        let http = Stub {
+            characterize: Arc::new(Mutex::new(VecDeque::new())),
+            // one answer: it serves walk_pending's consult, and the look reads the
+            // cached list — a forced consult inside the lease would go dark here
+            ambience: Arc::new(Mutex::new(
+                vec![Ok(json!({"debt": [entry]}))].into_iter().collect(),
+            )),
+        };
+        let cfg = ladder_cfg(json!({}));
+        let a = fresh_room(&dsn, &cfg, http, true);
+        *a.converged_params.borrow_mut() = ["param_0".to_string()].into_iter().collect();
+        let d = a.decide_trial(1).unwrap(); // the duty's probe in hand → the lease → the grace
+        assert_eq!(a.get_state(), CoordState::ProbePush);
+        assert_eq!(holder(&dsn).as_deref(), Some("tender-a"));
+        assert_eq!(d.mode, "hold");
+        moment_passed(&a);
+        let d = a.decide_trial(1).unwrap(); // the duty's level
+        assert_eq!(d.impulse_phase, Some("probe_push"));
+        assert_eq!(d.probe_param.as_deref(), Some("param_0"));
+        assert_eq!(d.probe_level, Some(25.0));
+        assert!(d.ambience_probe);
+        assert!(
+            a.duty_probe_in_hand.borrow().is_none(),
+            "the kept probe was pushed, not consulted again"
+        );
     }
 
     /// HOLD from the first trial: an active sender outranks everything,
