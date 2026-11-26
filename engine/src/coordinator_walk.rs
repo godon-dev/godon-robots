@@ -149,6 +149,19 @@ pub enum CoordError {
     Db(DbError),
 }
 
+/// The wait for causal before this tender has closed any round: the ambience page a
+/// fresh process asks before its first probe. The one number in the walk's timing that
+/// cannot be derived — every wait after the first round is the round's own length.
+pub(crate) const CAUSAL_COLD_START_SECS: f64 = 2.0;
+
+/// The watch-sleep door, as a decision: an idle, wishless tender wakes when a sender
+/// is active (its next decision holds), or when the lease is free while its own walk is
+/// pending and others are present (its next decision acquires). Two is the smallest
+/// group in which a lease can change hands.
+pub(crate) fn idle_wake_decision(sender_active: bool, peers: i64, walk_pending: bool) -> bool {
+    sender_active || (peers >= 2 && walk_pending)
+}
+
 impl From<WalkError> for CoordError {
     fn from(e: WalkError) -> Self {
         CoordError::Walk(e)
@@ -356,27 +369,37 @@ impl<C: Connect> ProbeCoordinator<C> {
         }
     }
 
-    /// Deskewed timeout for causal calls.
+    /// How long to wait for causal's answer: as long as this tender's recent probe
+    /// rounds took (the median of the last ten) — an answer is worth the round it
+    /// closes, and the round's own length is the walk's measure of that worth. Before
+    /// any round has closed there is nothing to derive from: the first consult waits
+    /// `CAUSAL_COLD_START_SECS`.
     ///
-    /// Budget = 2 × median trial duration ("waste at most 2 trials").
-    /// Tightened = 10 × median observed causal RTT (if we know it's
-    /// fast). Effective = min(budget, tightened), floored at 2s.
+    /// Replaces the 2 s floor and the "10 × median RTT" term (2026-11-25). Causal's
+    /// whole answer ran 0.95–1.9 s under a room's load; the floor timed out 41 of the
+    /// 46 answered rounds of room 45570732023, and each hang-up dropped the rest of the
+    /// handler (the self point, the archive writes). The RTT term learned only from
+    /// answered calls, so it could shrink but never grow back when causal slowed.
     pub(crate) fn causal_timeout(&self) -> f64 {
-        let floor = 2.0f64;
-        let mut budget = floor;
-        {
-            let trials = self.trial_duration_history.borrow();
-            if !trials.is_empty() {
-                budget = (floor).max(median(&trials) * 2.0);
-            }
+        let rounds = self.round_length_history.borrow();
+        if rounds.is_empty() {
+            return CAUSAL_COLD_START_SECS;
         }
-        let rtts = self.causal_rtt_history.borrow();
-        if !rtts.is_empty() {
-            let tightened = floor.max(median(&rtts) * 10.0);
-            return budget.min(tightened);
+        median(&rounds)
+    }
+
+    /// A probe round closed: remember how long it took — the causal wait's input.
+    /// Keeps the last ten, like the trial and RTT histories. A non-positive length is
+    /// a clock fault, not a round, and is not recorded.
+    pub(crate) fn record_round_length(&self, secs: f64) {
+        if secs.is_nan() || secs <= 0.0 {
+            return;
         }
-        // No RTT history yet — use budget as-is (generous on first call)
-        budget
+        let mut h = self.round_length_history.borrow_mut();
+        h.push(secs);
+        if h.len() > 10 {
+            h.remove(0);
+        }
     }
 
     // ─── Causal Client ───────────────────────────────────────────────
@@ -1370,6 +1393,23 @@ impl<C: Connect> ProbeCoordinator<C> {
         }
     }
 
+    /// The watch-sleep door for an idle, wishless tender — the worker's pacing asks
+    /// between sleep slices. The reads are taken only as far as needed: an active
+    /// sender answers at once. A loud read error counts as pending: the next decision
+    /// surfaces it instead of a silent long sleep.
+    pub(crate) fn idle_wake_pending(&self) -> bool {
+        let sender_active = self.has_active_sender();
+        let (peers, walk_pending) = if sender_active {
+            (0, false)
+        } else {
+            (
+                self.count_active_systemtenders(),
+                self.walk_pending().unwrap_or(true),
+            )
+        };
+        idle_wake_decision(sender_active, peers, walk_pending)
+    }
+
     // ── PROBE_PUSH (sender) ──────────────────────────────────────────
 
     fn handle_probe_push(&self, trial_number: i64) -> Result<Decision, CoordError> {
@@ -1494,7 +1534,11 @@ impl<C: Connect> ProbeCoordinator<C> {
 
         *self.pause_count.borrow_mut() += 1;
         if *self.pause_count.borrow() >= self.pause_block_size {
-            *self.round_pause_end.borrow_mut() = Some(Utc::now());
+            let now = Utc::now();
+            *self.round_pause_end.borrow_mut() = Some(now);
+            if let Some(start) = *self.round_push_start.borrow() {
+                self.record_round_length((now - start).num_milliseconds() as f64 / 1000.0);
+            }
             log::debug!(
                 "PROBE_PAUSE: done for param={} level={}",
                 probe.param_name,
@@ -1875,25 +1919,57 @@ mod walk_tests {
 
     // ── adaptive timeout (python test_timeout_*) ─────────────────────
 
+    // ── the causal wait (an answer is worth the round it closes) ──────
+
     #[test]
-    fn timeout_ladder_offline() {
+    fn the_wait_follows_the_round() {
         let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
-        // no history → floor
-        assert_eq!(coord.causal_timeout(), 2.0);
-        // scales with trial duration: median 45s → budget 90s
-        for d in [40.0, 45.0, 50.0] {
-            coord.record_trial_duration(d);
+        *coord.round_length_history.borrow_mut() = vec![2.5, 3.0, 4.1];
+        assert_eq!(coord.causal_timeout(), 3.0);
+    }
+
+    #[test]
+    fn the_first_round_is_its_own_measure() {
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        coord.record_round_length(3.7);
+        assert_eq!(coord.causal_timeout(), 3.7);
+    }
+
+    #[test]
+    fn one_stalled_round_does_not_stretch_the_wait() {
+        // room 45570732023 (2026-11-25): rounds of 2.2–4.1 s, and single stalls of
+        // 13–50 s at lease gaps — the median keeps the wait at the walk's own pace
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        *coord.round_length_history.borrow_mut() =
+            vec![2.5, 2.6, 2.4, 2.7, 50.0, 2.5, 2.8, 2.6, 2.5, 2.7];
+        assert_eq!(coord.causal_timeout(), 2.6);
+    }
+
+    #[test]
+    fn before_any_round_the_first_consult_waits_the_cold_start() {
+        // the one place a number is unavoidable: a fresh process asking before it has
+        // closed a round (the ambience page). Every call after the first round derives.
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        assert_eq!(coord.causal_timeout(), CAUSAL_COLD_START_SECS);
+        assert_eq!(CAUSAL_COLD_START_SECS, 2.0);
+    }
+
+    #[test]
+    fn round_lengths_keep_the_last_ten_and_skip_the_impossible() {
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        for i in 1..=12 {
+            coord.record_round_length(i as f64);
         }
-        assert_eq!(coord.causal_timeout(), 90.0);
-        // tightened by observed rtt: median 5ms → 0.05s → floored 2s
-        *coord.causal_rtt_history.borrow_mut() = vec![0.005, 0.005];
-        assert_eq!(coord.causal_timeout(), 2.0);
-        // fast trials, slow causal: min(budget, tightened)
-        let coord2 = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
-        *coord2.trial_duration_history.borrow_mut() = vec![1.0, 1.0];
-        *coord2.causal_rtt_history.borrow_mut() = vec![0.5, 0.6];
-        // budget = 2, tightened = 5.5 → 2
-        assert_eq!(coord2.causal_timeout(), 2.0);
+        // the same window as the trial and RTT histories
+        assert_eq!(
+            *coord.round_length_history.borrow(),
+            vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        );
+        coord.record_round_length(0.0);
+        coord.record_round_length(-1.5);
+        coord.record_round_length(f64::NAN);
+        assert_eq!(coord.round_length_history.borrow().len(), 10);
+        assert_eq!(coord.round_length_history.borrow()[9], 12.0);
     }
 
     // ── neutral params (python _get_neutral_params) ──────────────────
@@ -2715,5 +2791,39 @@ mod room_walk_tests {
         *a.hold_count.borrow_mut() = MAX_HOLD_TRIALS;
         let _ = a.decide_trial(2).unwrap();
         assert_eq!(a.get_state(), CoordState::Idle);
+    }
+}
+
+#[cfg(test)]
+mod idle_wake_tests {
+    //! The watch-sleep door: an idle, wishless tender wakes when its NEXT decision would
+    //! act — hold for an active sender, or take a free lease for its own pending walk
+    //! while others are present. A parked tender among parked peers keeps the cadence.
+    use super::*;
+
+    #[test]
+    fn an_active_sender_wakes_a_listener() {
+        assert!(idle_wake_decision(true, 1, false));
+        assert!(idle_wake_decision(true, 6, false));
+    }
+
+    #[test]
+    fn a_free_lease_wakes_a_pending_walker_among_peers() {
+        assert!(idle_wake_decision(false, 2, true));
+        assert!(idle_wake_decision(false, 6, true));
+    }
+
+    #[test]
+    fn a_parked_tender_keeps_the_watch_cadence() {
+        // walk complete, others present: nothing the next decision would do
+        assert!(!idle_wake_decision(false, 6, false));
+    }
+
+    #[test]
+    fn a_lone_tender_keeps_the_watch_cadence() {
+        // pending or not: with nobody else there is no lease to take
+        assert!(!idle_wake_decision(false, 1, true));
+        assert!(!idle_wake_decision(false, 0, true));
+        assert!(!idle_wake_decision(false, 0, false));
     }
 }
