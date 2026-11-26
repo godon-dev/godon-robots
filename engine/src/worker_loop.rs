@@ -205,6 +205,13 @@ pub trait Coordinator {
         lease_phase: Option<&str>,
     );
     fn record_trial_duration(&self, duration_secs: f64);
+    /// Whether an idle, wishless tender should cut its watch sleep short (see
+    /// `paced_watch_sleep`): its next decision would act — hold for an active
+    /// sender, or take a free lease for its own pending walk while others are
+    /// present. Default: never (fakes and stubs).
+    fn idle_wake_pending(&self) -> bool {
+        false
+    }
 }
 
 impl<C: Connect> Coordinator for ProbeCoordinator<C> {
@@ -235,6 +242,44 @@ impl<C: Connect> Coordinator for ProbeCoordinator<C> {
     fn record_trial_duration(&self, duration_secs: f64) {
         self.record_trial_duration(duration_secs)
     }
+    fn idle_wake_pending(&self) -> bool {
+        ProbeCoordinator::idle_wake_pending(self)
+    }
+}
+
+/// The standing watch's slice: an idle, wishless tender sleeps its watch interval
+/// in slices of this length and asks between slices whether it has a reason to run again.
+pub(crate) const WATCH_SLICE_SECS: f64 = 0.5;
+
+/// The standing watch's sleep for an idle, wishless tender: `interval` slept through
+/// `sleeper` in slices of `slice`, cut short as soon as `wake_now` says the tender has a
+/// reason to ask again. Returns the seconds slept.
+///
+/// Why slices: the watch interval (10 s by default) is a PARKED tender's cadence. A
+/// listener is not parked — it went idle because its sender yielded the lease, and the
+/// next sender takes the lease within ~1.5 s. One whole interval there deafened every
+/// listener for ~10 s after each yield, and each of the walker's rounds in that stretch
+/// found no receiver rows (room 45570732023, 2026-11-25: 135 refusals of 181 rounds).
+pub(crate) fn paced_watch_sleep(
+    interval: f64,
+    slice: f64,
+    sleeper: &dyn Fn(f64),
+    mut wake_now: impl FnMut() -> bool,
+) -> f64 {
+    let mut slept = 0.0;
+    while slept + 1e-9 < interval {
+        let step = if slice > 0.0 {
+            slice.min(interval - slept)
+        } else {
+            interval - slept
+        };
+        sleeper(step);
+        slept += step;
+        if wake_now() {
+            break;
+        }
+    }
+    slept
 }
 
 // ─── the windmill client ──────────────────────────────────────────
@@ -2533,9 +2578,21 @@ impl<K: Coordinator> Worker<K> {
                     // tenders spun at ~4 trials/s, and the watch never
                     // sampled. The coordinator's OWN state is the
                     // reliable resting verdict (COORD state=idle,
-                    // measured live).
+                    // measured live). A listener between senders is idle by
+                    // the same verdict and must not sleep the whole interval:
+                    // the sleep goes in slices and is cut short when the next
+                    // decision would act (`paced_watch_sleep`, 2026-11-25).
                     if self.wish.is_none() && self.coordinator.get_state().as_str() == "idle" {
-                        (self.sleeper)(self.watch_interval_secs);
+                        let interval = self.watch_interval_secs;
+                        let slept =
+                            paced_watch_sleep(interval, WATCH_SLICE_SECS, &*self.sleeper, || {
+                                self.coordinator.idle_wake_pending()
+                            });
+                        if slept + 1e-9 < interval {
+                            log::info!(
+                                "WATCH: cut short after {slept:.1}s of {interval:.1}s — asking again"
+                            );
+                        }
                     }
                 }
             }
@@ -5205,5 +5262,93 @@ mod tests {
             assert_eq!(b.upper - b.lower, (b.upper - b.lower)); // range is derivable, fields sane
         }
         assert!(w.dials.collect_upper_bounds(&json!({})).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod watch_pacing_tests {
+    //! The standing watch's sleep for an idle, wishless tender. #431 paced it as ONE
+    //! whole watch interval (10 s by default) — which also caught a listener between
+    //! senders and deafened every listener for ~10 s after each lease yield: the walker
+    //! re-acquires within ~1.5 s and its rounds in that stretch found no receiver rows
+    //! (room 45570732023, 2026-11-25: 135 refusals of 181 rounds).
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// What the sleeper was asked to sleep, in order.
+    #[derive(Clone, Default)]
+    struct Sleeps(Arc<Mutex<Vec<f64>>>);
+
+    impl Sleeps {
+        fn sleeper(&self) -> impl Fn(f64) + '_ {
+            move |s: f64| self.0.lock().unwrap().push(s)
+        }
+        fn taken(&self) -> Vec<f64> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn a_parked_tender_sleeps_the_whole_watch_interval_in_slices() {
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(10.0, 0.5, &sleeps.sleeper(), || false);
+        assert_eq!(total, 10.0);
+        assert_eq!(sleeps.taken().len(), 20);
+        assert!(
+            sleeps.taken().iter().all(|s| *s == 0.5),
+            "{:?}",
+            sleeps.taken()
+        );
+    }
+
+    #[test]
+    fn a_listener_wakes_after_one_slice_when_a_sender_appears() {
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(10.0, 0.5, &sleeps.sleeper(), || true);
+        assert_eq!(total, 0.5);
+        assert_eq!(sleeps.taken(), vec![0.5]);
+    }
+
+    #[test]
+    fn a_listener_wakes_as_soon_as_the_reason_appears() {
+        let sleeps = Sleeps::default();
+        let mut asks = 0;
+        let total = paced_watch_sleep(10.0, 0.5, &sleeps.sleeper(), || {
+            asks += 1;
+            asks == 4
+        });
+        assert_eq!((total, sleeps.taken().len(), asks), (2.0, 4, 4));
+    }
+
+    #[test]
+    fn a_short_interval_is_one_sleep() {
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(0.3, 0.5, &sleeps.sleeper(), || false);
+        assert_eq!((total, sleeps.taken()), (0.3, vec![0.3]));
+    }
+
+    #[test]
+    fn a_rest_shorter_than_a_slice_is_not_split() {
+        // 1.2 s in 0.5 s slices: 0.5, 0.5, then the remaining 0.2 — never a zero-length sleep
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(1.2, 0.5, &sleeps.sleeper(), || false);
+        let taken = sleeps.taken();
+        assert_eq!(taken.len(), 3);
+        assert!((total - 1.2).abs() < 1e-9, "{total}");
+        assert!((taken[2] - 0.2).abs() < 1e-9, "{taken:?}");
+    }
+
+    #[test]
+    fn a_bad_slice_never_spins() {
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(10.0, 0.0, &sleeps.sleeper(), || false);
+        assert_eq!((total, sleeps.taken()), (10.0, vec![10.0]));
+    }
+
+    #[test]
+    fn no_interval_no_sleep() {
+        let sleeps = Sleeps::default();
+        let total = paced_watch_sleep(0.0, 0.5, &sleeps.sleeper(), || false);
+        assert_eq!((total, sleeps.taken().len()), (0.0, 0));
     }
 }

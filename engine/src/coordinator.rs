@@ -89,10 +89,13 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     /// round timestamps for causal probe_result calls
     pub(crate) round_push_start: RefCell<Option<DateTime<Utc>>>,
     pub(crate) round_pause_end: RefCell<Option<DateTime<Utc>>>,
-    /// causal RTT history (seconds, rolling 10) and the system's own
-    /// trial-duration history — the adaptive timeout's two inputs
+    /// causal RTT history (seconds, rolling 10), logged per answered call, and the
+    /// system's own trial-duration history
     pub(crate) causal_rtt_history: RefCell<Vec<f64>>,
     pub(crate) trial_duration_history: RefCell<Vec<f64>>,
+    /// lengths of the probe rounds this tender closed (seconds, rolling 10) — the
+    /// causal wait derives from them: an answer is worth the round it closes
+    pub(crate) round_length_history: RefCell<Vec<f64>>,
     /// the map's named ambience debt for THIS tender, memoized so
     /// per-trial polls never hammer the notebook. None = not
     /// consulted or the consult went dark (a dark view is not an
@@ -204,6 +207,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             round_pause_end: RefCell::new(None),
             causal_rtt_history: RefCell::new(Vec::new()),
             trial_duration_history: RefCell::new(Vec::new()),
+            round_length_history: RefCell::new(Vec::new()),
             ambience_debt_cache: RefCell::new(None),
             stretch_cycles: RefCell::new(0),
             char_walk: RefCell::new(None),
