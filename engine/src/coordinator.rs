@@ -89,6 +89,10 @@ pub struct ProbeCoordinator<C: Connect = DsnConnect> {
     /// round timestamps for causal probe_result calls
     pub(crate) round_push_start: RefCell<Option<DateTime<Utc>>>,
     pub(crate) round_pause_end: RefCell<Option<DateTime<Utc>>>,
+    /// When this tender last took the lease: the first push block after it parks
+    /// until the listeners have had their wake slice and one trial
+    /// (`first_round_grace`); spent when that block starts.
+    pub(crate) lease_acquired_at: RefCell<Option<DateTime<Utc>>>,
     /// causal RTT history (seconds, rolling 10), logged per answered call, and the
     /// system's own trial-duration history
     pub(crate) causal_rtt_history: RefCell<Vec<f64>>,
@@ -205,6 +209,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             converged_params: RefCell::new(HashSet::new()),
             round_push_start: RefCell::new(None),
             round_pause_end: RefCell::new(None),
+            lease_acquired_at: RefCell::new(None),
             causal_rtt_history: RefCell::new(Vec::new()),
             trial_duration_history: RefCell::new(Vec::new()),
             round_length_history: RefCell::new(Vec::new()),

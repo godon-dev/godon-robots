@@ -27,6 +27,7 @@ use crate::coordinator::{ProbeCoordinator, MAX_HOLD_TRIALS};
 use crate::coverage_walk::{round9, Bounds, CoverageWalk, ParamWalkStatus};
 use crate::ledger::{Connect, DbError};
 use crate::walk_policy::{HttpError, HttpTransport, WalkError, WalkPolicy};
+use crate::worker_loop::WATCH_SLICE_SECS;
 
 /// Consult memo lifetime (seconds): char_complete and demand
 /// publication poll per trial; the notebook deserves one GET per this
@@ -400,6 +401,45 @@ impl<C: Connect> ProbeCoordinator<C> {
         if h.len() > 10 {
             h.remove(0);
         }
+    }
+
+    /// How long the first push block of a freshly taken lease waits before it
+    /// starts: the listeners' wake slice plus one trial of this tender's own
+    /// median length. Derived, not chosen (room 45851074156, 2026-11-26): after
+    /// a lease change every listener is idle, wakes within `WATCH_SLICE_SECS`,
+    /// and needs one trial to publish a row — a first push block of 0.84 s closed
+    /// before any of them had, and the engine refused the round (no receiver
+    /// with both windows). Rounds after the first need nothing: the listeners
+    /// hold from then on. Before any trial is known, the slice alone.
+    pub(crate) fn first_round_grace(&self) -> f64 {
+        let trials = self.trial_duration_history.borrow();
+        WATCH_SLICE_SECS
+            + if trials.is_empty() {
+                0.0
+            } else {
+                median(&trials)
+            }
+    }
+
+    /// The first push block of a freshly taken lease parks here until the
+    /// listeners have had their moment (`first_round_grace`): Some(park) while
+    /// they have not, None once they have — and the mark is spent, so every
+    /// later block of this lease starts at once.
+    fn first_block_waits(&self) -> Option<Decision> {
+        let taken = *self.lease_acquired_at.borrow();
+        let taken = taken?;
+        let waited = (Utc::now() - taken).num_milliseconds() as f64 / 1000.0;
+        let grace = self.first_round_grace();
+        if waited < grace {
+            log::info!(
+                "LEASE GRACE: {waited:.1}s of {grace:.1}s — parking until the listeners hold"
+            );
+            return Some(self.park_result(
+                "first round after the lease: the listeners' wake slice plus one trial",
+            ));
+        }
+        *self.lease_acquired_at.borrow_mut() = None;
+        None
     }
 
     // ─── Causal Client ───────────────────────────────────────────────
@@ -1323,6 +1363,7 @@ impl<C: Connect> ProbeCoordinator<C> {
             log::info!("Acquired lease — starting characterization");
             *self.state.borrow_mut() = CoordState::ProbePush;
             *self.push_count.borrow_mut() = 0;
+            *self.lease_acquired_at.borrow_mut() = Some(Utc::now());
             *self.neutral_params.borrow_mut() = None; // force recompute
             return self.handle_probe_push(trial_number);
         }
@@ -1415,6 +1456,11 @@ impl<C: Connect> ProbeCoordinator<C> {
     fn handle_probe_push(&self, trial_number: i64) -> Result<Decision, CoordError> {
         // First trial of a new push block: ask the walk for next level
         if *self.push_count.borrow() == 0 {
+            // A freshly taken lease parks its first block until the listeners
+            // have had their moment (`first_round_grace`).
+            if let Some(park) = self.first_block_waits() {
+                return Ok(park);
+            }
             // Precise remeasure: a wish override pins the WHERE of the
             // probe (the lease, push/pause windows and characterize
             // calls stay this coordinator's own machinery). Cleared
@@ -1619,6 +1665,7 @@ impl<C: Connect> ProbeCoordinator<C> {
                     );
                     *self.state.borrow_mut() = CoordState::ProbePush;
                     *self.push_count.borrow_mut() = 0;
+                    *self.lease_acquired_at.borrow_mut() = Some(Utc::now());
                     return self.handle_probe_push(trial_number);
                 }
             }
@@ -1970,6 +2017,48 @@ mod walk_tests {
         coord.record_round_length(f64::NAN);
         assert_eq!(coord.round_length_history.borrow().len(), 10);
         assert_eq!(coord.round_length_history.borrow()[9], 12.0);
+    }
+
+    // ── the first round after a lease (the listeners' moment) ────────
+
+    #[test]
+    fn the_first_round_waits_the_wake_slice_plus_one_trial() {
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        assert_eq!(coord.first_round_grace(), WATCH_SLICE_SECS);
+        for _ in 0..10 {
+            coord.record_trial_duration(1.0);
+        }
+        assert_eq!(coord.first_round_grace(), WATCH_SLICE_SECS + 1.0);
+    }
+
+    #[test]
+    fn a_freshly_taken_lease_parks_its_first_push() {
+        // room 45851074156 (2026-11-26): a 1.55 s round right after a lease change,
+        // nobody in its 0.84 s push window — refused. The first block now waits.
+        let coord = make_coord(&one_param(), CausalStub::new(vec![], vec![]));
+        // long trials make the grace long enough that no test-machine stall can
+        // spend it between two statements
+        for _ in 0..10 {
+            coord.record_trial_duration(30.0);
+        }
+        *coord.lease_acquired_at.borrow_mut() = Some(Utc::now());
+        let d = coord.first_block_waits().expect("the first block parks");
+        assert_eq!(d.mode, "hold");
+        assert!(d.impulse_phase.is_none(), "parked, not pushing");
+        assert!(
+            coord.round_push_start.borrow().is_none(),
+            "no push window opened"
+        );
+        assert!(
+            coord.lease_acquired_at.borrow().is_some(),
+            "the mark stays until the moment has passed"
+        );
+        // the moment passed (a 30.5 s grace): spent, and nothing waits from here on
+        *coord.lease_acquired_at.borrow_mut() =
+            Some(Utc::now() - chrono::TimeDelta::try_seconds(60).unwrap());
+        assert!(coord.first_block_waits().is_none());
+        assert!(coord.lease_acquired_at.borrow().is_none());
+        assert!(coord.first_block_waits().is_none());
     }
 
     // ── neutral params (python _get_neutral_params) ──────────────────
@@ -2592,6 +2681,13 @@ mod room_walk_tests {
         })
     }
 
+    /// The listeners' moment, spent: the grace is wall time, the tests drive
+    /// trials back-to-back, so the mark is moved a minute into the past.
+    fn moment_passed(a: &ProbeCoordinator<DsnConnect>) {
+        *a.lease_acquired_at.borrow_mut() =
+            Some(Utc::now() - chrono::TimeDelta::try_seconds(60).unwrap());
+    }
+
     fn holder(dsn: &str) -> Option<String> {
         let mut client = postgres::Client::connect(dsn, postgres::NoTls).unwrap();
         let row = client
@@ -2617,8 +2713,20 @@ mod room_walk_tests {
         let cfg = ladder_cfg(json!({"quantum_cycles": 99}));
         let a = fresh_room(&dsn, &cfg, http, true);
 
-        // t1: IDLE → sees 2 live members, inits the ladder, acquires,
-        // first push
+        // t1: IDLE → sees 2 live members, inits the ladder, acquires — and the
+        // first block of a fresh lease PARKS: the listeners get their moment
+        // (the wake slice plus a trial; nothing known yet → the slice alone)
+        let d = a.decide_trial(1).unwrap();
+        assert_eq!(d.mode, "hold");
+        assert!(d.impulse_phase.is_none(), "parked, not pushing");
+        assert!(!d.detection_trial);
+        assert_eq!(
+            holder(&dsn).as_deref(),
+            Some("tender-a"),
+            "the lease is held through the park"
+        );
+        // the moment passed: first push
+        moment_passed(&a);
         let d = a.decide_trial(1).unwrap();
         assert_eq!(d.mode, "impulse");
         assert_eq!(d.impulse_phase, Some("probe_push"));
@@ -2626,7 +2734,6 @@ mod room_walk_tests {
         assert!(!d.ambience_probe);
         assert_eq!(d.probe_param.as_deref(), Some("param_0"));
         assert_eq!(d.probe_level, Some(50.0));
-        assert_eq!(holder(&dsn).as_deref(), Some("tender-a"));
 
         // t2, t3: push block completes → PAUSE
         assert_eq!(a.decide_trial(2).unwrap().impulse_phase, Some("probe_push"));
@@ -2686,7 +2793,11 @@ mod room_walk_tests {
         let cfg =
             ladder_cfg(json!({"quantum_cycles": 1, "push_block_size": 2, "pause_block_size": 2}));
         let a = fresh_room(&dsn, &cfg, http, true);
-        let _ = a.decide_trial(1).unwrap(); // acquire + push 1
+        let d = a.decide_trial(1).unwrap(); // acquire + park (the listeners' moment)
+        assert_eq!(d.mode, "hold");
+        assert!(d.impulse_phase.is_none());
+        moment_passed(&a);
+        let _ = a.decide_trial(1).unwrap(); // push 1
         let _ = a.decide_trial(2).unwrap(); // push 2 → PAUSE
         let _ = a.decide_trial(3).unwrap(); // pause 1
         let _ = a.decide_trial(4).unwrap(); // pause 2 → cycle done → YIELD
